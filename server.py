@@ -61,15 +61,29 @@ def _resolver_poppler_path():
     """
     Encuentra el poppler que va a usar pdf2image, en orden de prioridad:
     1. Variable de entorno POPPLER_PATH (override explicito).
-    2. Una carpeta "poppler/bin" empaquetada junto al ejecutable/script -- asi es como
+    2. Un archivo local "poppler_path.txt" junto a este script, con la ruta en texto
+       plano -- pensado para desarrollo local: a diferencia de una variable de entorno
+       de Windows (que solo la ven procesos NUEVOS despues de configurarla -- una
+       terminal ya abierta, o hasta una pestaña nueva dentro de la misma app de
+       terminal, puede seguir viendo el valor viejo hasta reiniciar sesion), este
+       archivo se lee directo en cada arranque, sin ese problema. No se versiona en
+       git (cada quien tiene poppler en un lugar distinto).
+    3. Una carpeta "poppler/bin" empaquetada junto al ejecutable/script -- asi es como
        se distribuye en el .exe para que la app funcione en una maquina que no tiene
        poppler instalado ni en el PATH.
-    3. None -- pdf2image usa el poppler que encuentre en el PATH del sistema (typical
+    4. None -- pdf2image usa el poppler que encuentre en el PATH del sistema (typical
        en Linux/Mac con apt/brew, o si alguien lo agrego a mano en Windows).
     """
     desde_env = os.environ.get("POPPLER_PATH")
     if desde_env and os.path.exists(desde_env):
         return desde_env
+
+    archivo_config = os.path.join(BASE_DIR, "poppler_path.txt")
+    if os.path.exists(archivo_config):
+        with open(archivo_config, "r", encoding="utf-8") as f:
+            desde_archivo = f.read().strip()
+        if desde_archivo and os.path.exists(desde_archivo):
+            return desde_archivo
 
     empaquetado = os.path.join(BASE_DIR, "poppler", "bin")
     if os.path.exists(empaquetado):
@@ -777,9 +791,15 @@ def run_audit_background(
                 )
                 datos = extraer_datos_texto(full_text)
             except Exception as e:
+                # Antes esto se tragaba el error en silencio -- "Fallo" sin mas detalle,
+                # imposible de diagnosticar despues (ni en consola ni en el reporte). Se
+                # imprime a consola para quien tenga acceso a la terminal, y ademas queda
+                # en el texto crudo de la tarjeta/reporte para que tambien sea visible
+                # para quien solo use la app (sin terminal a mano).
+                print(f"[ERROR] Página {page_num}: {type(e).__name__}: {e}")
                 datos = {}
                 metodo_origen = "Fallo"
-                full_text = ""
+                full_text = f"[ERROR] {type(e).__name__}: {e}"
                 ocr_result = None
 
             doc_detected = datos.get("documento")

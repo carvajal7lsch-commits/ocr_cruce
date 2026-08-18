@@ -17,8 +17,6 @@ los resultados clasificados en Verificados, Alertas, Faltantes y Huérfanos.
 ![Consola en tiempo real](docs/screenshot-consola.png)
 ![Conciliación e informe](docs/screenshot-resultados.png)
 
-*(agrega tus propias capturas en `docs/` y actualiza las rutas de arriba)*
-
 ## ✨ Qué hace
 
 - **OCR en lote**: procesa todas las páginas de un PDF en paralelo, con texto embebido
