@@ -1,5 +1,13 @@
 # Auditoría de Cédulas — OCR vs Excel 🆔🔍
 
+### ⬇️ [**Descargar para Windows**](https://github.com/carvajal7lsch-commits/ocr_cruce/releases/download/v1.0.0/AuditoriaCedulas-Windows.zip)
+
+No necesitas instalar Python, ni poppler, ni saber programar: descarga el `.zip` del
+link de arriba, descomprímelo, y haz doble clic en `AuditoriaCedulas.exe`. Se abre
+solo en tu navegador. Eso es todo.
+
+---
+
 Aplicación web para auditar documentos de identidad colombianos (cédulas, tarjetas de
 identidad, cédulas de extranjería, contraseñas) escaneados en un PDF contra una base
 de datos en Excel: lee cada página con OCR, cruza los datos contra el Excel por
@@ -47,18 +55,16 @@ SQLite · Frontend: HTML/CSS/JS sin build step (sin frameworks).
 
 ### Opción A — Ejecutable de Windows (sin instalar nada)
 
-Para alguien que solo quiere probarlo, sin Python ni terminal:
+Es el botón de descarga de arriba. Un par de detalles adicionales:
 
-1. Descarga el `.zip` de la última versión.
-2. Descomprímelo en cualquier carpeta.
-3. Haz doble clic en `AuditoriaCedulas.exe` (está dentro de la carpeta `AuditoriaCedulas/`
-   — hay que mantener esa carpeta completa junta, no mover solo el `.exe`).
-4. Se abre solo una ventana de consola (normal, ahí se ve el progreso) y el navegador
-   con la app, en `http://127.0.0.1:8000`.
-
-Los modelos de OCR ya vienen incluidos en el paquete, así que no hace falta internet
-para usarlo. Si el puerto 8000 ya está ocupado por otra cosa en tu equipo, corre
-`set PORT=8001 && AuditoriaCedulas.exe` desde la consola en vez de hacerle doble clic.
+- Al descomprimir, hay que mantener la carpeta `AuditoriaCedulas/` completa junta
+  (no mover solo el `.exe` a otro lado, necesita los archivos de al lado para
+  funcionar).
+- Al abrirlo se ve una ventana de consola de fondo (normal, ahí se muestra el
+  progreso) y el navegador se abre solo con la app.
+- Los modelos de OCR ya vienen incluidos, así que no hace falta internet para usarlo.
+- Si el puerto 8000 ya está ocupado por otra cosa en tu equipo, corre
+  `set PORT=8001 && AuditoriaCedulas.exe` desde una consola en vez de hacerle doble clic.
 
 ### Opción B — Desde el código fuente (para desarrolladores)
 
