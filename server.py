@@ -1412,6 +1412,27 @@ if os.path.exists(_static_dir):
     app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
 
 
+def _encontrar_puerto_libre(preferido=8000, intentos=15):
+    """
+    Prueba el puerto preferido y, si esta ocupado (otra app en la maquina del usuario,
+    o incluso otra instancia de esta misma app que quedo colgada), prueba los
+    siguientes hasta encontrar uno libre. Sin esto, un puerto ocupado le impediria a
+    alguien sin conocimientos tecnicos abrir la app con un simple doble clic -- tendria
+    que enterarse de que existe un problema de puerto y saber corregirlo a mano.
+    """
+    import socket
+    for offset in range(intentos):
+        puerto = preferido + offset
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            try:
+                s.bind(("127.0.0.1", puerto))
+                return puerto
+            except OSError:
+                continue
+    return preferido  # ninguno quedo libre; se intenta con el preferido de todas formas
+
+
 def _abrir_navegador_cuando_este_listo(url, intentos=40, espera_seg=0.5):
     """
     Espera a que el servidor responda antes de abrir el navegador -- para el .exe
@@ -1442,13 +1463,17 @@ if __name__ == "__main__":
     # se abre el navegador solo, como una app de escritorio. En modo desarrollo
     # (python server.py directo) se mantiene el flujo de siempre.
     empaquetado = getattr(sys, "frozen", False)
-    # Permite elegir otro puerto si el 8000 ya esta ocupado en la maquina del usuario
-    # (otra app corriendo ahi, por ejemplo) sin tener que tocar el codigo.
-    puerto = int(os.environ.get("PORT", 8000))
-    url = f"http://127.0.0.1:{puerto}"
+    puerto_deseado = int(os.environ.get("PORT", 8000))
 
     if empaquetado:
+        # Si PORT vino explicito, se respeta tal cual (alguien lo puso a proposito).
+        # Si no, se busca automaticamente uno libre a partir de 8000 -- asi un puerto
+        # ocupado en la maquina del usuario nunca le rompe el doble-clic-y-listo.
+        puerto = puerto_deseado if "PORT" in os.environ else _encontrar_puerto_libre(puerto_deseado)
+        url = f"http://127.0.0.1:{puerto}"
         threading.Thread(target=_abrir_navegador_cuando_este_listo, args=(url,), daemon=True).start()
         uvicorn.run(app, host="127.0.0.1", port=puerto, reload=False)
     else:
+        puerto = puerto_deseado
+        url = f"http://127.0.0.1:{puerto}"
         uvicorn.run("server:app", host="127.0.0.1", port=puerto, reload=True)
