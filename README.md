@@ -1,6 +1,6 @@
 # Auditoría de Cédulas — OCR vs Excel 🆔🔍
 
-### ⬇️ [**Descargar para Windows**](https://github.com/carvajal7lsch-commits/ocr_cruce/releases/download/v1.0.0/AuditoriaCedulas-Windows.zip)
+### ⬇️ [**Descargar para Windows**](https://github.com/carvajal7lsch-commits/ocr_cruce/releases/download/v1.0.1/AuditoriaCedulas-Windows.zip)
 
 No necesitas instalar Python, ni poppler, ni saber programar: descarga el `.zip` del
 link de arriba, descomprímelo, y haz doble clic en `AuditoriaCedulas.exe`. Se abre
