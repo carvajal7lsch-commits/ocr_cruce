@@ -1,57 +1,105 @@
-# Auditoría y Verificación de Cédulas (PDF OCR vs. Excel) 🆔🔍
+# Auditoría de Cédulas — OCR vs Excel 🆔🔍
 
-Esta es una aplicación web interactiva desarrollada con **Streamlit**, **Pandas**, **EasyOCR** y **pdf2image** para auditar y verificar documentos de identidad (cédulas) extraídos de un archivo PDF frente a una base de datos estructurada en Excel.
+Aplicación web para auditar documentos de identidad colombianos (cédulas, tarjetas de
+identidad, cédulas de extranjería, contraseñas) escaneados en un PDF contra una base
+de datos en Excel: lee cada página con OCR, cruza los datos contra el Excel por
+documento y por nombre (con coincidencia difusa), y genera un reporte descargable con
+los resultados clasificados en Verificados, Alertas, Faltantes y Huérfanos.
+
+![Consola en tiempo real](docs/screenshot-consola.png)
+![Conciliación e informe](docs/screenshot-resultados.png)
+
+*(agrega tus propias capturas en `docs/` y actualiza las rutas de arriba)*
+
+## ✨ Qué hace
+
+- **OCR en lote**: procesa todas las páginas de un PDF en paralelo, con texto embebido
+  (PyMuPDF) cuando el PDF ya lo trae y OCR real (RapidOCR) cuando no.
+- **Extracción estructurada**: documento, nombre, fecha de nacimiento, tipo de
+  documento (CC/TI/CE/Contraseña), lugar de nacimiento, sexo, estatura, RH y fecha/lugar
+  de expedición — vía zona MRZ, posición de etiquetas en la plantilla, y un heurístico
+  de respaldo, con filtros específicos para no confundir ruido de la plantilla
+  (encabezados, firmas, nombre del registrador) con el nombre del titular.
+- **Conciliación difusa contra Excel**: detecta automáticamente la fila de encabezado y
+  las columnas de documento/nombre, y compara con `rapidfuzz` tolerando reordenamientos,
+  palabras fusionadas por el OCR y nombres incompletos.
+- **Fusión automática de páginas huérfanas**: cuando el anverso y el reverso de una
+  misma cédula quedan separados porque una cara no dejó leer el número de documento,
+  el sistema las reconecta solo por similitud de nombre — con una salvaguarda de
+  cercanía de página para no arriesgarse a mezclar a dos personas distintas.
+- **Consola en tiempo real** con vista del documento analizado, tarjetas editables,
+  buscador por cédula/nombre y filtro de sugerencias pendientes.
+- **Historial persistente** (SQLite) para reabrir auditorías anteriores sin volver a
+  correr el OCR.
+- **Reporte Excel** formateado por categoría, con el texto OCR crudo incluido para
+  poder diagnosticar casos raros sin tener que re-procesar.
+- **Modo claro/oscuro.**
+
+## 🧱 Stack
+
+Backend: FastAPI + Uvicorn · OCR: RapidOCR (ONNX) + PyMuPDF · PDF→imagen: pdf2image
+(poppler) · Datos: pandas, openpyxl · Coincidencia difusa: rapidfuzz · Persistencia:
+SQLite · Frontend: HTML/CSS/JS sin build step (sin frameworks).
 
 ---
 
-## 🚀 Requisitos de Instalación
+## 🚀 Cómo correrlo
 
-### 1. Dependencias de Sistema (Obligatorio)
+### Opción A — Ejecutable de Windows (sin instalar nada)
 
-Para que la librería `pdf2image` pueda convertir las páginas del PDF a imágenes, requiere tener instalado **Poppler** en el sistema:
+Para alguien que solo quiere probarlo, sin Python ni terminal:
 
-#### **Windows:**
-1. Descarga la última versión de Poppler para Windows (por ejemplo, desde [GitHub Releases de poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases/)).
-2. Extrae el archivo ZIP en una ruta de tu preferencia (ej: `C:\Program Files\poppler`).
-3. Agrega la ruta de la carpeta `bin` (ej: `C:\Program Files\poppler\bin`) a las variables de entorno de tu sistema (`PATH`), **o cópiala y pégala en el campo correspondiente en la barra lateral de la aplicación.**
+1. Descarga el `.zip` de la última versión.
+2. Descomprímelo en cualquier carpeta.
+3. Haz doble clic en `AuditoriaCedulas.exe` (está dentro de la carpeta `AuditoriaCedulas/`
+   — hay que mantener esa carpeta completa junta, no mover solo el `.exe`).
+4. Se abre solo una ventana de consola (normal, ahí se ve el progreso) y el navegador
+   con la app, en `http://127.0.0.1:8000`.
 
-#### **Linux (Ubuntu/Debian):**
-```bash
-sudo apt-get install poppler-utils
-```
+Los modelos de OCR ya vienen incluidos en el paquete, así que no hace falta internet
+para usarlo. Si el puerto 8000 ya está ocupado por otra cosa en tu equipo, corre
+`set PORT=8001 && AuditoriaCedulas.exe` desde la consola en vez de hacerle doble clic.
 
-#### **macOS (Homebrew):**
-```bash
-brew install poppler
-```
+### Opción B — Desde el código fuente (para desarrolladores)
 
----
-
-### 2. Dependencias de Python (Pip)
-
-Instala todos los paquetes necesarios ejecutando el siguiente comando en tu terminal:
+Requiere Python 3.9+ y [Poppler](https://github.com/oschwartz10612/poppler-windows/releases)
+instalado (o accesible por `PATH`, o apuntado con la variable de entorno
+`POPPLER_PATH`).
 
 ```bash
+# Windows / Linux / macOS
+git clone <url-del-repo>
+cd cruce_excel
 pip install -r requirements.txt
+python server.py
 ```
 
-*Nota: Al iniciar la validación por primera vez, `easyocr` descargará automáticamente el modelo de detección y reconocimiento de texto en español (esto demorará unos segundos).*
+Se abre en `http://127.0.0.1:8000`. En Linux/macOS instala poppler con tu gestor de
+paquetes (`apt install poppler-utils` / `brew install poppler`) antes de correrlo.
 
 ---
 
-## 🏃‍♂️ Cómo Ejecutar la Aplicación
-
-Una vez instaladas las dependencias, arranca el servidor web interactivo:
+## 🛠️ Construir el ejecutable tú mismo
 
 ```bash
-python -m streamlit run app.py
+pip install pyinstaller
+pyinstaller AuditoriaCedulas.spec
 ```
 
-La aplicación se cargará automáticamente en tu navegador predeterminado (por defecto en `http://localhost:8501`).
+El resultado queda en `dist/AuditoriaCedulas/` — esa carpeta completa (no solo el
+`.exe`) es lo que hay que distribuir. El `.spec` bundlea el frontend y, si existe en
+tu máquina, el `bin` de Poppler (variable `POPPLER_BIN_SOURCE` en el `.spec` para
+apuntar a tu instalación).
 
 ---
 
-## 🛡️ Características Principales
-- **Cruce por Cédula Inteligente:** Extrae números de cédula utilizando expresiones regulares sobre los resultados del OCR y busca coincidencias en la columna llave del Excel.
-- **Fuzzy Matching (Comparación Difusa):** Valida nombres, apellidos u otros campos usando coincidencia Levenshtein (`rapidfuzz`) tolerando errores leves de tilde, formato o escaneo.
-- **Reporte Descargable:** Genera un archivo Excel (`Reporte_Auditoria_OCR.xlsx`) formateado profesionalmente con semáforos de estado (Correcto, Alertas de discrepancia y Faltantes).
+## 📁 Estructura
+
+```
+server.py           API (FastAPI) y orquestación del OCR
+src/parser.py        Extracción de campos desde el texto OCR
+src/ocr.py            Motor OCR (RapidOCR) y preprocesamiento de imagen
+src/reporter.py       Generación del reporte Excel
+src/db.py              Historial persistente (SQLite)
+static/                Frontend (HTML/CSS/JS, sin build step)
+```

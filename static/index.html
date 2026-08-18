@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auditoría de Cédulas | OCR vs Excel</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+        // Aplica el tema guardado ANTES de que el CSS pinte la pagina -- si esto se
+        // hiciera desde app.js (que corre despues, en DOMContentLoaded) se veria un
+        // parpadeo del tema oscuro por defecto antes de cambiar a claro.
+        (function () {
+            try {
+                var tema = localStorage.getItem('tema');
+                if (tema === 'light') document.documentElement.setAttribute('data-theme', 'light');
+            } catch (e) {}
+        })();
+    </script>
+</head>
+<body>
+    <svg style="position:absolute; width:0; height:0; overflow:hidden;" aria-hidden="true">
+        <defs>
+            <symbol id="icon-id-card" viewBox="0 0 24 24">
+                <rect x="3" y="5" width="18" height="14" rx="2"/>
+                <circle cx="8.5" cy="10.5" r="1.5"/>
+                <path d="M6 16c0-1.5 1.5-2.5 2.5-2.5s2.5 1 2.5 2.5"/>
+                <line x1="13" y1="9" x2="18" y2="9"/>
+                <line x1="13" y1="13" x2="18" y2="13"/>
+            </symbol>
+            <symbol id="icon-camera" viewBox="0 0 24 24">
+                <path d="M4 8a2 2 0 0 1 2-2h1.2a2 2 0 0 0 1.6-.8l.6-.8a2 2 0 0 1 1.6-.8h2a2 2 0 0 1 1.6.8l.6.8a2 2 0 0 0 1.6.8H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8z"/>
+                <circle cx="12" cy="13" r="3.2"/>
+            </symbol>
+            <symbol id="icon-image" viewBox="0 0 24 24">
+                <rect x="3" y="4" width="18" height="16" rx="2"/>
+                <circle cx="8.5" cy="9.5" r="1.5"/>
+                <path d="M21 15l-5-5a2 2 0 0 0-2.8 0L4 19"/>
+            </symbol>
+            <symbol id="icon-target" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="8"/>
+                <circle cx="12" cy="12" r="4.5"/>
+                <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/>
+            </symbol>
+            <symbol id="icon-file-text" viewBox="0 0 24 24">
+                <path d="M6 3h8l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/>
+                <path d="M14 3v5h5"/>
+                <line x1="8.5" y1="12.5" x2="15.5" y2="12.5"/>
+                <line x1="8.5" y1="16" x2="15.5" y2="16"/>
+            </symbol>
+            <symbol id="icon-bar-chart" viewBox="0 0 24 24">
+                <line x1="5" y1="20" x2="5" y2="12"/>
+                <line x1="12" y1="20" x2="12" y2="6"/>
+                <line x1="19" y1="20" x2="19" y2="15"/>
+                <line x1="3" y1="20" x2="21" y2="20"/>
+            </symbol>
+            <symbol id="icon-folder" viewBox="0 0 24 24">
+                <path d="M3 7a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7z"/>
+            </symbol>
+            <symbol id="icon-play" viewBox="0 0 24 24">
+                <path d="M6 4l14 8-14 8V4z" fill="currentColor" stroke="none"/>
+            </symbol>
+            <symbol id="icon-sliders" viewBox="0 0 24 24">
+                <line x1="4" y1="7" x2="20" y2="7"/>
+                <circle cx="9" cy="7" r="2.3" fill="currentColor" stroke="none"/>
+                <line x1="4" y1="12" x2="20" y2="12"/>
+                <circle cx="15" cy="12" r="2.3" fill="currentColor" stroke="none"/>
+                <line x1="4" y1="17" x2="20" y2="17"/>
+                <circle cx="7" cy="17" r="2.3" fill="currentColor" stroke="none"/>
+            </symbol>
+            <symbol id="icon-monitor" viewBox="0 0 24 24">
+                <rect x="3" y="4" width="18" height="12" rx="1.5"/>
+                <line x1="8" y1="20" x2="16" y2="20"/>
+                <line x1="12" y1="16" x2="12" y2="20"/>
+            </symbol>
+            <symbol id="icon-history" viewBox="0 0 24 24">
+                <path d="M3 11a9 9 0 1 1 2.6 6.3"/>
+                <path d="M3 5v6h6"/>
+                <path d="M12 8v4l3 2"/>
+            </symbol>
+            <symbol id="icon-eye" viewBox="0 0 24 24">
+                <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"/>
+                <circle cx="12" cy="12" r="3"/>
+            </symbol>
+            <symbol id="icon-user" viewBox="0 0 24 24">
+                <circle cx="12" cy="8" r="3.5"/>
+                <path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/>
+            </symbol>
+            <symbol id="icon-check-circle" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="9"/>
+                <path d="M8 12.5l2.5 2.5L16 9"/>
+            </symbol>
+            <symbol id="icon-alert-triangle" viewBox="0 0 24 24">
+                <path d="M12 4l9.5 16H2.5L12 4z"/>
+                <line x1="12" y1="10" x2="12" y2="14.5"/>
+                <circle cx="12" cy="17.2" r="0.9" fill="currentColor" stroke="none"/>
+            </symbol>
+            <symbol id="icon-search" viewBox="0 0 24 24">
+                <circle cx="10.5" cy="10.5" r="6.5"/>
+                <line x1="15.3" y1="15.3" x2="20" y2="20"/>
+            </symbol>
+            <symbol id="icon-download" viewBox="0 0 24 24">
+                <path d="M12 3v12"/>
+                <path d="M7 11l5 5 5-5"/>
+                <line x1="4" y1="20" x2="20" y2="20"/>
+            </symbol>
+            <symbol id="icon-calendar" viewBox="0 0 24 24">
+                <rect x="3" y="5" width="18" height="16" rx="2"/>
+                <line x1="3" y1="10" x2="21" y2="10"/>
+                <line x1="8" y1="3" x2="8" y2="7"/>
+                <line x1="16" y1="3" x2="16" y2="7"/>
+            </symbol>
+            <symbol id="icon-trash" viewBox="0 0 24 24">
+                <path d="M4 7h16"/>
+                <path d="M9 7V4h6v3"/>
+                <path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>
+                <line x1="10" y1="11" x2="10" y2="17"/>
+                <line x1="14" y1="11" x2="14" y2="17"/>
+            </symbol>
+            <symbol id="icon-clock" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="9"/>
+                <path d="M12 7v5l3.5 2"/>
+            </symbol>
+            <symbol id="icon-edit" viewBox="0 0 24 24">
+                <path d="M4 20h4l10.5-10.5a2 2 0 0 0 0-2.8l-1.2-1.2a2 2 0 0 0-2.8 0L4 16v4z"/>
+                <path d="M13 6l3 3"/>
+            </symbol>
+            <symbol id="icon-check" viewBox="0 0 24 24">
+                <path d="M4 12.5l5 5L20 6"/>
+            </symbol>
+            <symbol id="icon-x" viewBox="0 0 24 24">
+                <line x1="5" y1="5" x2="19" y2="19"/>
+                <line x1="19" y1="5" x2="5" y2="19"/>
+            </symbol>
+            <symbol id="icon-lightbulb" viewBox="0 0 24 24">
+                <path d="M9 18h6"/>
+                <path d="M10 21h4"/>
+                <path d="M12 3a6 6 0 0 0-3.5 10.9c.6.45 1 1.15 1 1.9v.2h5v-.2c0-.75.4-1.45 1-1.9A6 6 0 0 0 12 3z"/>
+            </symbol>
+            <symbol id="icon-settings" viewBox="0 0 24 24">
+                <path d="M 12.0 2.7 L 14.72 5.44 L 18.58 5.42 L 18.56 9.28 L 21.3 12.0 L 18.56 14.72 L 18.58 18.58 L 14.72 18.56 L 12.0 21.3 L 9.28 18.56 L 5.42 18.58 L 5.44 14.72 L 2.7 12.0 L 5.44 9.28 L 5.42 5.42 L 9.28 5.44 Z" stroke-linejoin="round"/>
+                <circle cx="12" cy="12" r="2.6"/>
+            </symbol>
+            <symbol id="icon-sun" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="4.2"/>
+                <path d="M12 2.5v2.4M12 19.1v2.4M21.5 12h-2.4M4.9 12H2.5M18.36 5.64l-1.7 1.7M7.34 16.66l-1.7 1.7M18.36 18.36l-1.7-1.7M7.34 7.34l-1.7-1.7"/>
+            </symbol>
+            <symbol id="icon-moon" viewBox="0 0 24 24">
+                <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>
+            </symbol>
+        </defs>
+    </svg>
+    <div class="container">
+        <!-- Header -->
+        <header class="main-header">
+            <div class="header-top-row">
+                <div class="logo">
+                    <svg class="icon icon-logo"><use href="#icon-id-card"/></svg>
+                    <h1>Auditoría de Cédulas <span class="subtitle">OCR & Excel</span></h1>
+                </div>
+                <div class="header-actions">
+                    <button type="button" class="btn-header-action" id="theme_toggle_btn" title="Cambiar a modo claro">
+                        <svg class="icon" id="theme_toggle_icon"><use href="#icon-moon"/></svg>
+                    </button>
+                    <button type="button" class="btn-header-action" id="open_config_btn" title="Configuración">
+                        <svg class="icon"><use href="#icon-settings"/></svg>
+                        <span>Config</span>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Config Modal -->
+        <div class="modal-overlay hidden" id="config_modal_overlay">
+            <div class="modal card" id="config_modal">
+                <div class="modal-header">
+                    <h2><svg class="icon"><use href="#icon-sliders"/></svg> Configuración</h2>
+                    <button type="button" class="btn-icon-only" id="close_config_btn" title="Cerrar">
+                        <svg class="icon"><use href="#icon-x"/></svg>
+                    </button>
+                </div>
+
+                <div class="form-group config-panel-main">
+                    <label><svg class="icon"><use href="#icon-target"/></svg> Umbral Similitud Nombres (%)</label>
+                    <input type="range" id="similarity_threshold" min="40" max="100" value="90">
+                    <div class="range-value"><span id="similarity_val">90</span>%</div>
+                </div>
+
+                <details class="advanced-settings">
+                    <summary>Configuración avanzada</summary>
+                    <div class="advanced-settings-body">
+                        <div class="form-group">
+                            <label><svg class="icon"><use href="#icon-file-text"/></svg> Rango de Páginas</label>
+                            <div class="form-row">
+                                <input type="number" id="start_page" min="1" value="1">
+                                <input type="number" id="end_page" min="1" value="1">
+                            </div>
+                            <small class="tip">Por defecto se procesa el PDF completo (<span id="total_pages_hint">se detecta al cargar el archivo</span>). Cambia esto solo si quieres analizar una parte.</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label><svg class="icon"><use href="#icon-camera"/></svg> Resolución (DPI)</label>
+                            <input type="range" id="pdf_dpi" min="150" max="400" value="300" step="50">
+                            <div class="range-value"><span id="dpi_val">300</span> DPI</div>
+                            <small class="tip">Texto pequeño (fecha de nacimiento, número de documento) se detecta mucho peor por debajo de 250 DPI.</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="img_filter"><svg class="icon"><use href="#icon-image"/></svg> Preprocesamiento de Imagen</label>
+                            <select id="img_filter">
+                                <option value="Solo Escala de Grises" selected>Solo Escala de Grises (recomendado)</option>
+                                <option value="Ninguno (Imagen Original)">Ninguno (Imagen Original)</option>
+                                <option value="Binarización Blanco y Negro (Otsu)">Binarización Otsu (experimental)</option>
+                                <option value="Binarización Adaptativa (Sombras/Reflejos)">Binarización Adaptativa (experimental)</option>
+                                <option value="Mejora de Contraste y Enfoque (Nítido)">Mejora de Contraste y Enfoque (Nítido)</option>
+                            </select>
+                            <small class="tip">RapidOCR es un modelo de red neuronal, no Tesseract: Escala de Grises ya funciona mejor en la mayoría de los casos, las demás son solo para comparar.</small>
+                        </div>
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <!-- Main Workspace -->
+        <main class="workspace">
+            <!-- Main Content Area -->
+            <section class="content-area">
+                <!-- Main App Tabs Header -->
+                <div class="main-tabs-header">
+                    <button class="main-tab-btn active" data-main-tab="tab_setup"><svg class="icon"><use href="#icon-folder"/></svg> Carga y Configuración</button>
+                    <button class="main-tab-btn" data-main-tab="tab_console" id="main_tab_btn_console"><svg class="icon"><use href="#icon-monitor"/></svg> Consola en Tiempo Real</button>
+                    <button class="main-tab-btn" data-main-tab="tab_results" id="main_tab_btn_results"><svg class="icon"><use href="#icon-bar-chart"/></svg> Conciliación e Informe</button>
+                    <button class="main-tab-btn" data-main-tab="tab_history" id="main_tab_btn_history"><svg class="icon"><use href="#icon-history"/></svg> Historial</button>
+                </div>
+
+                <!-- Main Tab 1: Setup & Upload -->
+                <div class="main-tab-content active" id="tab_setup">
+                    <!-- Dropzones -->
+                    <div class="dropzone-container">
+                        <!-- Excel Upload -->
+                        <div class="dropzone card" id="excel_dropzone">
+                            <input type="file" id="excel_file" accept=".xlsx, .xls" hidden>
+                            <div class="dropzone-content">
+                                <svg class="icon icon-dropzone"><use href="#icon-bar-chart"/></svg>
+                                <h3>Base de Datos Excel</h3>
+                                <p>Arrastra tu archivo o haz clic para buscar</p>
+                                <span class="file-name" id="excel_file_name">Ningún archivo seleccionado</span>
+                            </div>
+                        </div>
+
+                        <!-- PDF Upload -->
+                        <div class="dropzone card" id="pdf_dropzone">
+                            <input type="file" id="pdf_file" accept=".pdf" hidden>
+                            <div class="dropzone-content">
+                                <svg class="icon icon-dropzone"><use href="#icon-file-text"/></svg>
+                                <h3>Archivo PDF de Cédulas</h3>
+                                <p>Arrastra tu archivo o haz clic para buscar</p>
+                                <span class="file-name" id="pdf_file_name">Ningún archivo seleccionado</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Excel Configuration & Preview (Hidden in layout, but kept in DOM for selectors) -->
+                    <div class="card preview-card" id="excel_preview_section" style="display: none;">
+                        <div class="preview-header">
+                            <h2><svg class="icon"><use href="#icon-bar-chart"/></svg> Mapeo y Vista Previa de Columnas</h2>
+                            <span class="badge" id="row_detected_badge">Fila detectada: N/A</span>
+                        </div>
+
+                        <div class="mapping-selectors">
+                            <div class="form-group">
+                                <label for="row_selector">Fila de Encabezado (Columnas):</label>
+                                <select id="row_selector"></select>
+                            </div>
+                            <div class="form-group">
+                                <label for="key_col_selector">Columna de Documento (Llave):</label>
+                                <select id="key_col_selector"></select>
+                            </div>
+                            <div class="form-group">
+                                <label for="compare_cols_selector">Columnas a Verificar (Nombres/Apellidos):</label>
+                                <select id="compare_cols_selector" multiple class="multi-select"></select>
+                                <small class="tip">Mantén presionado Ctrl o Cmd para seleccionar múltiples columnas</small>
+                            </div>
+                        </div>
+
+                        <div class="table-container">
+                            <table id="excel_preview_table">
+                                <thead></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Run Validation Panel -->
+                    <div class="action-panel hidden" id="action_panel">
+                        <button class="btn btn-primary btn-large" id="start_audit_btn">
+                            <svg class="icon"><use href="#icon-play"/></svg> Iniciar Validación por OCR (RapidOCR)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Main Tab 2: Live Processing Console -->
+                <div class="main-tab-content" id="tab_console">
+                    <div class="console-split-layout">
+                        <!-- Left: Raw OCR Text -->
+                        <div class="console-left card">
+                            <div class="console-header">
+                                <h3><svg class="icon"><use href="#icon-eye"/></svg> Vista del Documento Analizado</h3>
+                                <span class="status-indicator" id="console_ocr_status">En espera...</span>
+                            </div>
+                            <div class="console-image-wrapper">
+                                <img id="console_ocr_image" src="" alt="Ningún documento cargado" class="ocr-view-img">
+                            </div>
+                        </div>
+                        
+                        <!-- Right: Extracted Cards / Excel People -->
+                        <div class="console-right card">
+                            <div class="console-header">
+                                <h3><svg class="icon"><use href="#icon-user"/></svg> <span id="console_right_title">Datos Extraídos de Cédulas</span></h3>
+                                <div class="console-source-toggle">
+                                    <button type="button" class="source-toggle-btn active" id="source_toggle_pdf" data-source="pdf">PDF</button>
+                                    <button type="button" class="source-toggle-btn" id="source_toggle_excel" data-source="excel">Excel</button>
+                                </div>
+                            </div>
+                            <div class="console-filters">
+                                <div class="search-input-wrapper">
+                                    <svg class="icon"><use href="#icon-search"/></svg>
+                                    <input type="text" id="card_search_input" placeholder="Buscar por cédula o nombre...">
+                                </div>
+                                <button type="button" class="filter-toggle-btn" id="only_suggestions_btn" title="Mostrar solo tarjetas con sugerencia de corrección pendiente">
+                                    <svg class="icon"><use href="#icon-lightbulb"/></svg> Con sugerencias
+                                </button>
+                            </div>
+                            <div class="extracted-cards-container" id="extracted_cards_list">
+                                <div class="empty-state">No se ha iniciado la validación. Los datos extraídos aparecerán aquí.</div>
+                            </div>
+                            <div class="extracted-cards-container hidden" id="excel_records_list">
+                                <div class="empty-state">Sube un Excel para ver la lista de personas.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Main Tab 3: Comparative Results & Report -->
+                <div class="main-tab-content" id="tab_results">
+                    <!-- Progress State (Initially hidden) -->
+                    <div class="card progress-card hidden" id="progress_section">
+                        <div class="progress-info">
+                            <h3 id="progress_status">Analizando documentos...</h3>
+                            <div class="progress-info-right">
+                                <span class="elapsed-timer" id="elapsed_timer"><svg class="icon"><use href="#icon-clock"/></svg> 0s</span>
+                                <span id="progress_percent">0%</span>
+                            </div>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="progress_bar"></div>
+                        </div>
+                        <p class="progress-subtext" id="progress_subtext">Página 0 de 0</p>
+                    </div>
+
+                    <!-- Audit Results (Initially hidden) -->
+                    <div class="results-section hidden" id="results_section">
+                        <!-- Metric Cards -->
+                        <div class="metrics-grid">
+                            <div class="metric-card success">
+                                <div class="m-icon"><svg class="icon"><use href="#icon-check-circle"/></svg></div>
+                                <div class="m-info">
+                                    <span class="m-value" id="metric_correct">0</span>
+                                    <span class="m-label">Verificados Perfectos</span>
+                                </div>
+                            </div>
+                            <div class="metric-card danger">
+                                <div class="m-icon"><svg class="icon"><use href="#icon-alert-triangle"/></svg></div>
+                                <div class="m-info">
+                                    <span class="m-value" id="metric_alerts">0</span>
+                                    <span class="m-label">Alertas / Anomalías</span>
+                                </div>
+                            </div>
+                            <div class="metric-card warning">
+                                <div class="m-icon"><svg class="icon"><use href="#icon-search"/></svg></div>
+                                <div class="m-info">
+                                    <span class="m-value" id="metric_missing">0</span>
+                                    <span class="m-label">Faltantes en PDF</span>
+                                </div>
+                            </div>
+                            <div class="metric-card info">
+                                <div class="m-icon"><svg class="icon"><use href="#icon-user"/></svg></div>
+                                <div class="m-info">
+                                    <span class="m-value" id="metric_huerfanos">0</span>
+                                    <span class="m-label">Solo en PDF (Huérfanos)</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Downloader -->
+                        <div class="download-container">
+                            <span class="elapsed-final" id="elapsed_final"></span>
+                            <button class="btn btn-success" id="download_report_btn">
+                                <svg class="icon"><use href="#icon-download"/></svg> Descargar Reporte de Auditoría Excel (.xlsx)
+                            </button>
+                        </div>
+
+                        <!-- Results Tabs -->
+                        <div class="card tabs-card">
+                            <div class="tabs-header">
+                                <button class="tab-btn active" data-tab="tab_coinciden"><svg class="icon"><use href="#icon-check-circle"/></svg> Verificados Perfectos</button>
+                                <button class="tab-btn" data-tab="tab_anomalias"><svg class="icon"><use href="#icon-alert-triangle"/></svg> Alertas y Anomalías</button>
+                                <button class="tab-btn" data-tab="tab_solo_excel"><svg class="icon"><use href="#icon-search"/></svg> Faltantes en PDF</button>
+                                <button class="tab-btn" data-tab="tab_solo_pdf"><svg class="icon"><use href="#icon-user"/></svg> Solo en PDF</button>
+                            </div>
+                            
+                            <div class="tab-content active" id="tab_coinciden">
+                                <div class="table-container">
+                                    <table id="table_coinciden">
+                                        <thead>
+                                            <tr>
+                                                <th>Pág. PDF</th>
+                                                <th>Documento (Excel)</th>
+                                                <th>Nombre (Excel)</th>
+                                                <th>Documento (PDF)</th>
+                                                <th>Nombre (PDF)</th>
+                                                <th>Similitud %</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="tab-content" id="tab_anomalias">
+                                <div class="table-container">
+                                    <table id="table_anomalias">
+                                        <thead>
+                                            <tr>
+                                                <th>Pág. PDF</th>
+                                                <th>Documento (Excel)</th>
+                                                <th>Nombre (Excel)</th>
+                                                <th>Documento (PDF)</th>
+                                                <th>Nombre (PDF)</th>
+                                                <th>Similitud %</th>
+                                                <th>Detalle de Alerta</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="tab-content" id="tab_solo_excel">
+                                <div class="table-container">
+                                    <table id="table_solo_excel">
+                                        <thead>
+                                            <tr>
+                                                <th>Documento (Excel)</th>
+                                                <th>Nombre (Excel)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="tab-content" id="tab_solo_pdf">
+                                <div class="table-container">
+                                    <table id="table_solo_pdf">
+                                        <thead>
+                                            <tr>
+                                                <th>Pág. PDF</th>
+                                                <th>Documento (PDF)</th>
+                                                <th>Nombre (PDF)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Main Tab 4: History -->
+                <div class="main-tab-content" id="tab_history">
+                    <div class="card">
+                        <div class="card-title-row">
+                            <h3><svg class="icon"><use href="#icon-history"/></svg> Historial de Auditorías</h3>
+                        </div>
+                        <div class="extracted-cards-container" id="history_list">
+                            <div class="empty-state">Cargando historial...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
