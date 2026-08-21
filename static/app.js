@@ -37,6 +37,9 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const actionPanel = document.getElementById('action_panel');
     const startAuditBtn = document.getElementById('start_audit_btn');
+    const estimacionTiempo = document.getElementById('estimacion_tiempo');
+    const estimacionTiempoTexto = document.getElementById('estimacion_tiempo_texto');
+    const etaRestante = document.getElementById('eta_restante');
     
     const progressSection = document.getElementById('progress_section');
     const progressStatus = document.getElementById('progress_status');
@@ -72,32 +75,57 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSource = 'pdf';
     let cardSearchQuery = '';
     let onlySuggestions = false;
+    // Segundos por pagina medidos en corridas anteriores de ESTA maquina (lo manda
+    // /api/pdf-info). null = todavia no hay historial.
+    let segundosPorPagina = null;
 
     // Range input listeners
     pdfDpiInput.addEventListener('input', (e) => { dpiVal.textContent = e.target.value; });
     similarityThresholdInput.addEventListener('input', (e) => { similarityVal.textContent = e.target.value; });
 
+    // Helper generico para modales (abrir/cerrar con boton X, click afuera, o Escape) --
+    // usado tanto por el de Configuracion como por el de texto OCR crudo, para no
+    // duplicar la misma logica de apertura/cierre dos veces.
+    function setupModal(overlayEl, closeBtnEl) {
+        function open() { overlayEl.classList.remove('hidden'); }
+        function close() { overlayEl.classList.add('hidden'); }
+        if (closeBtnEl) closeBtnEl.addEventListener('click', close);
+        overlayEl.addEventListener('click', (e) => {
+            if (e.target === overlayEl) close();
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !overlayEl.classList.contains('hidden')) close();
+        });
+        return { open, close };
+    }
+
     // Config modal (se abre con el engranaje del header)
     const openConfigBtn = document.getElementById('open_config_btn');
-    const closeConfigBtn = document.getElementById('close_config_btn');
-    const configModalOverlay = document.getElementById('config_modal_overlay');
+    const configModal = setupModal(
+        document.getElementById('config_modal_overlay'),
+        document.getElementById('close_config_btn')
+    );
+    openConfigBtn.addEventListener('click', configModal.open);
 
-    function openConfigModal() {
-        configModalOverlay.classList.remove('hidden');
+    // Modal de texto OCR crudo (se abre desde el boton de cada tarjeta en la Consola)
+    const rawTextModal = setupModal(
+        document.getElementById('raw_text_modal_overlay'),
+        document.getElementById('close_raw_text_btn')
+    );
+
+    function openRawTextModal(res) {
+        const subtitle = document.getElementById('raw_text_modal_subtitle');
+        const content = document.getElementById('raw_text_modal_content');
+        if (subtitle) {
+            subtitle.textContent = `${res.document || 'Sin documento'} (Págs. ${(res.pages || []).join(', ')})`;
+        }
+        if (content) {
+            content.textContent = res.raw_text && res.raw_text.trim()
+                ? res.raw_text
+                : 'No se capturó texto OCR para esta tarjeta.';
+        }
+        rawTextModal.open();
     }
-
-    function closeConfigModal() {
-        configModalOverlay.classList.add('hidden');
-    }
-
-    openConfigBtn.addEventListener('click', openConfigModal);
-    closeConfigBtn.addEventListener('click', closeConfigModal);
-    configModalOverlay.addEventListener('click', (e) => {
-        if (e.target === configModalOverlay) closeConfigModal();
-    });
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && !configModalOverlay.classList.contains('hidden')) closeConfigModal();
-    });
 
     // Modo claro / oscuro -- el tema ya se aplico antes del primer render (ver script
     // inline en el <head>), aqui solo hace falta sincronizar el icono/texto del boton
@@ -229,6 +257,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (totalPagesHint) {
                 totalPagesHint.textContent = `${data.total_pages} páginas detectadas`;
             }
+            segundosPorPagina = data.segundos_por_pagina || null;
+            actualizarEstimacion();
 
             checkReadyToAudit();
         } catch (err) {
@@ -424,6 +454,17 @@ document.addEventListener('DOMContentLoaded', () => {
             if (data.status === 'processing' || data.status === 'queued') {
                 const statusText = data.status_detail || `Procesando página ${data.current_page}...`;
                 updateProgress(data.progress, statusText, data.current_page);
+
+                // Tiempo restante que calcula el backend con el ritmo real de ESTA
+                // corrida (se afina solo a medida que avanza).
+                if (etaRestante) {
+                    if (data.eta_seconds != null && data.eta_seconds > 0) {
+                        etaRestante.textContent = `faltan ~${formatDuration(data.eta_seconds)}`;
+                        etaRestante.classList.remove('hidden');
+                    } else {
+                        etaRestante.classList.add('hidden');
+                    }
+                }
                 
                 // Real-time OCR raw text and card display
                 if (data.live_results && data.live_results.length > 0) {
@@ -433,6 +474,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 clearInterval(pollInterval);
                 stopClientTimer(data.elapsed_seconds);
                 updateProgress(100, 'Auditoría completada exitosamente.', data.current_page);
+                if (etaRestante) etaRestante.classList.add('hidden');
                 
                 // Final console status update
                 const consoleStatus = document.getElementById('console_ocr_status');
@@ -480,6 +522,42 @@ document.addEventListener('DOMContentLoaded', () => {
         const rem = s % 60;
         return m > 0 ? `${m}m ${rem}s` : `${rem}s`;
     }
+
+    // Estimacion ANTES de arrancar. Se calcula con el ritmo real de corridas previas en
+    // esta maquina (lo manda el backend); la primera vez no hay historial y se dice
+    // claramente, en vez de inventar un numero que quedaria lejos.
+    function actualizarEstimacion() {
+        if (!estimacionTiempo || !estimacionTiempoTexto) return;
+        if (!pdfFileObj) {
+            estimacionTiempo.classList.add('hidden');
+            return;
+        }
+
+        const desde = parseInt(startPageInput.value, 10) || 1;
+        const hasta = parseInt(endPageInput.value, 10) || desde;
+        const paginas = Math.max(0, hasta - desde + 1);
+        if (paginas <= 0) {
+            estimacionTiempo.classList.add('hidden');
+            return;
+        }
+
+        if (segundosPorPagina) {
+            const total = segundosPorPagina * paginas;
+            // Se muestra como rango (+-20%) en vez de un numero exacto: el tiempo real
+            // varia con la calidad del escaneo y con lo que este haciendo el equipo, y
+            // un rango honesto envejece mejor que una cifra que casi nunca acierta.
+            estimacionTiempoTexto.textContent =
+                `Tiempo estimado: ${formatDuration(total * 0.8)} – ${formatDuration(total * 1.2)} para ${paginas} página(s)`;
+        } else {
+            estimacionTiempoTexto.textContent =
+                `${paginas} página(s) por procesar. La primera vez no hay con qué estimar el tiempo; ` +
+                `a partir de la próxima se calcula con el ritmo real de este equipo.`;
+        }
+        estimacionTiempo.classList.remove('hidden');
+    }
+
+    startPageInput.addEventListener('input', actualizarEstimacion);
+    endPageInput.addEventListener('input', actualizarEstimacion);
 
     function startClientTimer() {
         clientTimerStartedAt = Date.now();
@@ -696,6 +774,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="card-title-actions">
                         ${suggestionBadgeHtml}
                         <span class="card-method-badge ${res.method === 'Fallo' ? 'fallo' : ''}">${res.method}</span>
+                        <button type="button" class="btn-icon-only card-raw-text-btn" title="Ver texto OCR crudo"><svg class="icon"><use href="#icon-eye"/></svg></button>
                         ${actionsHtml}
                     </div>
                 </div>
@@ -711,6 +790,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Botones/inputs interactivos: manejar aparte y no disparar la seleccion de tarjeta
                 if (e.target.closest('.card-field-input')) {
                     e.stopPropagation();
+                    return;
+                }
+
+                const rawTextBtn = e.target.closest('.card-raw-text-btn');
+                if (rawTextBtn) {
+                    e.stopPropagation();
+                    openRawTextModal(res);
                     return;
                 }
 
@@ -969,6 +1055,21 @@ document.addEventListener('DOMContentLoaded', () => {
         actionPanel.classList.remove('hidden');
     }
 
+    // Las auditorias viejas quedaron guardadas en la base con el puntaje crudo de
+    // rapidfuzz (69.76744186046511). El servidor ya lo redondea al calcularlo, pero eso
+    // solo aplica a corridas nuevas -- por eso tambien se limpia aca al pintar, para que
+    // el historial se vea igual de prolijo.
+    function formatearPorcentaje(valor) {
+        const num = parseFloat(valor);
+        if (isNaN(num)) return valor;
+        return Number.isInteger(num) ? String(num) : num.toFixed(1);
+    }
+
+    // Mismo caso, pero para los porcentajes incrustados en el texto de la alerta.
+    function limpiarPorcentajesEnTexto(texto) {
+        return String(texto).replace(/(\d+\.\d+)\s*%/g, (_, n) => `${formatearPorcentaje(n)}%`);
+    }
+
     function renderResultTable(tableId, dataList, keys) {
         const table = document.getElementById(tableId);
         const tbody = table.querySelector('tbody');
@@ -991,7 +1092,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const td = document.createElement('td');
                 if (k === 'Similitud_Nombre_%') {
                     const score = item[k];
-                    td.innerHTML = `<span class="badge-cell ${score >= similarityThresholdInput.value ? 'success' : 'danger'}">${score}%</span>`;
+                    td.innerHTML = `<span class="badge-cell ${score >= similarityThresholdInput.value ? 'success' : 'danger'}">${formatearPorcentaje(score)}%</span>`;
+                } else if (k === 'Alerta_Detalle') {
+                    td.textContent = item[k] ? limpiarPorcentajesEnTexto(item[k]) : '';
                 } else if (k === 'Página_PDF') {
                     const pageNum = item[k];
                     if (pageNum && pageNum !== 'N/A') {
@@ -1138,7 +1241,7 @@ document.addEventListener('DOMContentLoaded', () => {
             container.querySelectorAll('.history-delete-btn').forEach(btn => {
                 btn.addEventListener('click', async (e) => {
                     e.stopPropagation();
-                    if (!confirm('¿Eliminar esta auditoría del historial? Esta acción no se puede deshacer.')) return;
+                    if (!confirm('¿Eliminar esta auditoría del historial? También se borra el escaneo cacheado de ese PDF, así que volver a auditarlo lo procesará desde cero. Esta acción no se puede deshacer.')) return;
                     try {
                         await fetch(`/api/history/${btn.dataset.taskId}`, { method: 'DELETE' });
                     } catch (err) {

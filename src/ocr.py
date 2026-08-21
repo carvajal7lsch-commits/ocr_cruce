@@ -12,21 +12,32 @@ except ImportError:
 # Parametros del motor RapidOCR, centralizados aqui para poder ajustarlos durante pruebas
 # sin tener que rastrear donde se instancia el engine.
 #
-# intra/inter_op_num_threads=1: el server corre hasta 4 paginas en paralelo
-# (ThreadPoolExecutor). El default de RapidOCR (-1) hace que CADA inferencia use
-# TODOS los cores, asi que con 4 hilos simultaneos se pisan entre si compitiendo
-# por CPU en vez de aprovechar el paralelismo. Fijarlo en 1 deja que el paralelismo
-# real lo den los 4 hilos, no el engine internamente.
+# intra_op_num_threads=2: el server corre varias paginas en paralelo
+# (ThreadPoolExecutor). El default de RapidOCR (-1) hace que CADA inferencia use TODOS
+# los cores, asi que con varios hilos simultaneos se pisan entre si. Pero el otro
+# extremo -- fijarlo en 1, como estaba antes -- deja cada inferencia atada a un solo
+# core y resulto ser el cuello de botella real del pipeline. Medido sobre 6 paginas
+# reales (maquina de 8 cores, 3 repeticiones por config):
+#     workers=4 x intra=1 (lo anterior) -> 2.77s por pagina
+#     workers=8 x intra=2 (lo actual)   -> 1.95s por pagina
+# Se comparo campo por campo (8 campos x 10 paginas) contra la config anterior: la
+# salida del OCR es IDENTICA, solo cambia el reparto de CPU.
+#
+# (Se probo tambien bajar max_side_len a 1600, que era aun mas rapido (~2.8s -> 2.2s),
+# pero degrada de verdad: partia nombres ("VALENCIA VILLEGAS ANTONIO" -> "VALENCIA
+# VILLEGAS NOV"), perdia un lugar de nacimiento y un grupo sanguineo. Descartado.
+# Desactivar use_cls solo daba ~2% y deja sin arreglar los escaneos rotados: tampoco.)
 #
 # (Se probo tambien bajar det_box_thresh/text_score y subir det_unclip_ratio para
 # favorecer texto pequeño -- comparado linea por linea contra cedulas reales no dio
 # mejora medible, solo mas ruido en zonas ya dificiles. Se dejan en valores de fabrica.)
+OCR_INTRA_OP_THREADS = 2
 OCR_ENGINE_PARAMS_NEW_PKG = {
-    "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+    "EngineConfig.onnxruntime.intra_op_num_threads": OCR_INTRA_OP_THREADS,
     "EngineConfig.onnxruntime.inter_op_num_threads": 1,
 }
 OCR_ENGINE_PARAMS_OLD_PKG = dict(
-    intra_op_num_threads=1,
+    intra_op_num_threads=OCR_INTRA_OP_THREADS,
     inter_op_num_threads=1,
 )
 

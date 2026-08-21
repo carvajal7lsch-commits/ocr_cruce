@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import uuid
+import hashlib
 import threading
 import webbrowser
 import datetime
@@ -116,6 +117,7 @@ task_reconcile_context = {}
 @app.on_event("startup")
 def _startup():
     db.init_db()
+    _backfill_claves_cache()
 
 # Patterns for auto-detection
 PATTERN_DOC_COL = re.compile(r'\b(doc|documento|cédula|cedula|cc|id|identificación|identificacion|número|numero|nro)\b', re.IGNORECASE)
@@ -234,7 +236,14 @@ async def get_pdf_info(pdf_file: UploadFile = File(...)):
                 total_pages = pdf_info.get("Pages", 1)
             except Exception:
                 total_pages = 1
-        return {"total_pages": total_pages}
+        return {
+            "total_pages": total_pages,
+            # Ritmo con el que el frontend calcula el tiempo estimado en cuanto se
+            # elige el rango de paginas. Viene del historial real de esta maquina
+            # (ver segundos_por_pagina_historico); si aun no hay historial se manda
+            # None y el frontend avisa que la estimacion se afinara al usarla.
+            "segundos_por_pagina": db.segundos_por_pagina_historico(),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener info del PDF: {str(e)}")
 
@@ -337,7 +346,7 @@ def reconciliar_y_generar_reporte(df_ocr, df_excel_clean, key_col, compare_cols,
                     "Página_PDF": int(pdf_row['Página']),
                     **_campos_pdf_extra(pdf_row),
                     "Texto_Completo_PDF": pdf_row['Texto_Completo'],
-                    "Alerta_Detalle": f"El nombre coincide ({best_score}%), pero la cédula del PDF ('{id_ocr}') difiere de la de Excel ('{id_ex}').",
+                    "Alerta_Detalle": f"El nombre coincide ({_fmt_pct(best_score)}%), pero la cédula del PDF ('{id_ocr}') difiere de la de Excel ('{id_ex}').",
                     "sugerencia_documento": id_ex,
                     "sugerencia_confianza": round(float(best_score), 1),
                 }
@@ -390,7 +399,7 @@ def reconciliar_y_generar_reporte(df_ocr, df_excel_clean, key_col, compare_cols,
                         "Página_PDF": int(pdf_row['Página']),
                         **_campos_pdf_extra(pdf_row),
                         "Texto_Completo_PDF": pdf_row['Texto_Completo'],
-                        "Alerta_Detalle": f"El documento del PDF ('{pdf_row['Documento_OCR']}') se parece mucho al de Excel ('{id_ex}', {round(best_doc_score, 1)}% de similitud) pero no coincide exacto -- probablemente un dígito mal leído.",
+                        "Alerta_Detalle": f"El documento del PDF ('{pdf_row['Documento_OCR']}') se parece mucho al de Excel ('{id_ex}', {_fmt_pct(best_doc_score)}% de similitud) pero no coincide exacto -- probablemente un dígito mal leído.",
                         "sugerencia_documento": id_ex,
                         "sugerencia_nombre": nombre_ex,
                         "sugerencia_confianza": round(float(best_doc_score), 1),
@@ -522,6 +531,12 @@ def _es_subconjunto_de_palabras(nombre_a, nombre_b):
     return len(corto) >= 2 and corto.issubset(largo)
 
 
+def _fmt_pct(valor):
+    """Porcentaje para mostrar dentro de un texto: sin el '.0' cuando es redondo."""
+    numero = round(float(valor), 1)
+    return str(int(numero)) if numero == int(numero) else str(numero)
+
+
 def _similitud_nombre(nombre_a, nombre_b):
     """
     token_sort_ratio ordena las PALABRAS pero no perdona que el OCR haya fusionado dos
@@ -553,8 +568,11 @@ def _similitud_nombre(nombre_a, nombre_b):
     letras_b = ''.join(sorted(nombre_b.replace(' ', '')))
     por_letras = fuzz.ratio(letras_a, letras_b)
     if por_letras >= 95:
-        return max(por_palabras, por_letras)
-    return por_palabras
+        return round(max(por_palabras, por_letras), 1)
+    # Se redondea aca (y no al mostrar) para que el mismo valor limpio viaje al reporte
+    # de Excel, a las tablas de la web y a los textos de alerta -- rapidfuzz devuelve
+    # cosas como 90.32424323432 y un decimal alcanza de sobra para decidir un umbral.
+    return round(por_palabras, 1)
 
 
 def _fusionar_entradas_live_results(existente, otra):
@@ -695,6 +713,229 @@ def _reasignar_huerfanos_por_nombre(df_ocr, threshold=90, max_distancia_paginas=
     return df_ocr
 
 
+def _integrar_resultado_en_live_results(task_id, res):
+    """
+    Mete el resultado de UNA pagina en las tarjetas de la Consola (live_results),
+    agrupando por documento. Antes vivia suelto dentro del loop de OCR; ahora tambien lo
+    usan las paginas que salen del cache, que tienen que pasar por exactamente la misma
+    fusion (mismo criterio de nombre mas largo, fecha que rellena, caras, etc.).
+    """
+    # Update live results database (grouping by Document ID) in real-time
+    if "live_results" not in tasks_db[task_id]:
+        tasks_db[task_id]["live_results"] = []
+
+    # Mismo identificador (real o "Sujeto_Pag_N") que ya quedo calculado
+    # en page_data, para que la tarjeta de la Consola y la fila de
+    # conciliacion de esta pagina usen exactamente el mismo valor.
+    doc_str = res["page_data"]["Documento_OCR"]
+
+    existing_idx = None
+    for j, live_res in enumerate(tasks_db[task_id]["live_results"]):
+        if live_res["document"] == doc_str:
+            existing_idx = j
+            break
+
+    datos_res = res.get("datos") or {}
+    campos_nuevos = ("tipo_documento", "lugar_nacimiento", "sexo",
+                      "estatura", "grupo_sanguineo", "fecha_lugar_expedicion")
+
+    if existing_idx is not None:
+        existing = tasks_db[task_id]["live_results"][existing_idx]
+        name_curr = str(res["name_detected"]).strip() if res["name_detected"] else ""
+        if len(name_curr) > len(existing["name"]):
+            existing["name"] = name_curr
+        date_curr = str(res["date_detected"]).strip()
+        date_changed = False
+        if date_curr and date_curr != "None" and (not existing["date"] or existing["date"] == "None"):
+            existing["date"] = date_curr
+            date_changed = True
+        if res["page_num"] not in existing["pages"]:
+            existing["pages"].append(res["page_num"])
+            existing["images"].append({"page": res["page_num"], "url": res["image_url"]})
+        if res["cara_detected"] not in existing["sides"]:
+            existing["sides"].append(res["cara_detected"])
+        if "Anverso (Frente)" in existing["sides"] and "Reverso (Atrás)" in existing["sides"]:
+            existing["side"] = "Ambas Caras (Completo)"
+        else:
+            existing["side"] = res["cara_detected"] if res["cara_detected"] != "No detectado" else existing["side"]
+        existing["raw_text"] += f"\n\n--- [PÁGINA {res['page_num']}] ---\n\n{res['full_text']}"
+
+        # Los campos nuevos suelen aparecer en una sola cara (p. ej. reverso);
+        # se rellenan solo si aun estan vacios, igual que la fecha.
+        for campo in campos_nuevos:
+            valor_nuevo = datos_res.get(campo)
+            if valor_nuevo and not existing.get(campo):
+                existing[campo] = valor_nuevo
+        if date_changed or not existing.get("edad"):
+            existing["edad"] = calcular_edad(existing["date"])
+    else:
+        nueva_entrada = {
+            "document": doc_str,
+            "name": str(res["name_detected"]).strip() if res["name_detected"] else "",
+            "date": str(res["date_detected"]).strip() if res["date_detected"] else "",
+            "side": res["cara_detected"],
+            "sides": [res["cara_detected"]],
+            "method": res["metodo_origen"],
+            "pages": [res["page_num"]],
+            "images": [{"page": res["page_num"], "url": res["image_url"]}],
+            "raw_text": res["full_text"],
+            "edad": datos_res.get("edad"),
+        }
+        for campo in campos_nuevos:
+            nueva_entrada[campo] = datos_res.get(campo)
+        tasks_db[task_id]["live_results"].append(nueva_entrada)
+
+    # Save current page text for live log
+    tasks_db[task_id]["current_page_text"] = res["full_text"]
+
+
+# --------------------------------------------------------------------------------------
+# Cache de OCR: reusar el escaneo de un PDF que ya se proceso antes
+# --------------------------------------------------------------------------------------
+# Escanear es lo caro de toda la corrida (~2 seg por pagina entre convertir a imagen y
+# pasar el OCR). Como el resultado depende unicamente del PDF y de dos ajustes (dpi y
+# filtro), volver a subir el MISMO archivo no tiene por que costar lo mismo la segunda
+# vez. Se guarda el resultado por pagina en la tabla ocr_cache y la imagen anotada en
+# static/ocr_cache/, ambas con el hash del contenido en la clave.
+
+CACHE_IMG_DIRNAME = "ocr_cache"
+
+
+def _hash_pdf(pdf_bytes):
+    """Identidad del PDF por CONTENIDO, no por nombre de archivo."""
+    return hashlib.sha256(pdf_bytes).hexdigest()
+
+
+def _slug_filtro(img_filter):
+    """El filtro va en el nombre del archivo, asi que se deja apto para disco."""
+    return re.sub(r'[^a-z0-9]+', '-', str(img_filter).lower()).strip('-') or "sin-filtro"
+
+
+def _nombre_imagen_cache(pdf_hash, dpi, img_filter, page_num):
+    return f"{pdf_hash[:16]}_{dpi}_{_slug_filtro(img_filter)}_p{page_num}.jpg"
+
+
+# <hash16>_<dpi>_<filtro-slug>_pN.jpg -- ver _nombre_imagen_cache
+_RE_NOMBRE_IMAGEN_CACHE = re.compile(r'^([0-9a-f]{16})_(\d+)_(.+)_p\d+\.jpg$', re.IGNORECASE)
+
+
+def _clave_cache_desde_imagenes(live_results, claves_conocidas):
+    """
+    Deduce la clave del cache de una auditoria vieja a partir del nombre de sus imagenes
+    anotadas. El nombre solo trae los primeros 16 caracteres del hash y el filtro
+    "sluggeado", asi que no alcanza por si solo: se usa para ubicar la clave COMPLETA
+    entre las que ya existen en el cache. Retorna None si no se puede identificar.
+    """
+    for entrada in live_results or []:
+        for imagen in (entrada or {}).get("images") or []:
+            nombre = str((imagen or {}).get("url") or "").rsplit("/", 1)[-1]
+            match = _RE_NOMBRE_IMAGEN_CACHE.match(nombre)
+            if not match:
+                continue
+            hash16, dpi, slug = match.group(1).lower(), int(match.group(2)), match.group(3).lower()
+            for clave in claves_conocidas:
+                if (clave["pdf_hash"][:16].lower() == hash16
+                        and clave["dpi"] == dpi
+                        and _slug_filtro(clave["img_filter"]) == slug):
+                    return clave
+    return None
+
+
+def _backfill_claves_cache():
+    """
+    Completa la clave del cache en las auditorias guardadas ANTES de que se empezara a
+    persistir (las que ya estaban en el historial al actualizar la app). Sin esto,
+    borrarlas del historial no borraria su cache y el mismo PDF seguiria saliendo
+    cacheado para siempre.
+
+    Corre al arrancar y es idempotente: una vez completada, la auditoria ya no aparece
+    en la consulta. Las que no se puedan resolver (su cache ya no existe) se dejan como
+    estan -- si no hay cache, tampoco hay nada que borrar despues.
+    """
+    try:
+        pendientes = db.auditorias_sin_clave_cache()
+        if not pendientes:
+            return
+        claves_conocidas = db.claves_cache_ocr()
+        if not claves_conocidas:
+            return
+        for task_id, live_results in pendientes:
+            clave = _clave_cache_desde_imagenes(live_results, claves_conocidas)
+            if clave:
+                db.set_audit_cache_key(task_id, clave["pdf_hash"], clave["dpi"], clave["img_filter"])
+    except Exception as err:
+        print(f"Advertencia: no se pudieron completar las claves de cache del historial: {err}")
+
+
+def _borrar_cache_ocr_de_auditoria(clave, task_id):
+    """
+    Borra el escaneo cacheado (filas de ocr_cache + imagenes anotadas en disco) de una
+    auditoria que se acaba de eliminar del historial, para que volver a subir ese PDF lo
+    procese desde cero en vez de reusar el escaneo viejo.
+
+    No se borra nada si quedo OTRA auditoria en el historial escaneada con la misma clave:
+    el cache es por contenido de PDF, no por auditoria, asi que llevarselo dejaria a esa
+    otra con la Vista del Documento en blanco.
+    """
+    resultado = {"cache_ocr_borrado": False, "paginas_cache_borradas": 0}
+    if not clave:
+        return resultado
+    try:
+        if db.otra_auditoria_usa_cache(clave["pdf_hash"], clave["dpi"], clave["img_filter"], task_id):
+            return resultado
+
+        filas, huerfanas = db.delete_cache_ocr(clave["pdf_hash"], clave["dpi"], clave["img_filter"])
+
+        # A las imagenes que nombraba el cache se les suman las que sigan en disco con el
+        # prefijo de esta clave: si alguna fila quedo sin image_url, el .jpg igual tiene
+        # que irse -- si no, nadie mas lo referencia y ocupa disco para siempre.
+        cache_dir = os.path.join(BASE_DIR, "static", CACHE_IMG_DIRNAME)
+        prefijo = f"{clave['pdf_hash'][:16]}_{clave['dpi']}_{_slug_filtro(clave['img_filter'])}_p"
+        nombres = set(huerfanas)
+        try:
+            nombres.update(n for n in os.listdir(cache_dir) if n.startswith(prefijo))
+        except OSError:
+            pass
+        for nombre in nombres:
+            ruta = os.path.join(cache_dir, nombre)
+            if os.path.isfile(ruta):
+                os.remove(ruta)
+
+        resultado.update({"cache_ocr_borrado": True, "paginas_cache_borradas": filas})
+    except Exception as err:
+        # Que falle la limpieza del cache no puede tumbar el borrado del historial, que
+        # para el usuario es lo que pidio y ya se hizo.
+        print(f"Advertencia: no se pudo borrar el cache de OCR de {task_id}: {err}")
+    return resultado
+
+
+def _rangos_contiguos(paginas):
+    """
+    [3,4,5,9,10] -> [(3,5), (9,10)]. Sirve para pedirle a poppler solo los tramos que
+    faltan escanear: si el cache ya tiene el medio del PDF, no se convierte al pedo.
+    """
+    rangos = []
+    for pagina in sorted(paginas):
+        if rangos and pagina == rangos[-1][1] + 1:
+            rangos[-1][1] = pagina
+        else:
+            rangos.append([pagina, pagina])
+    return [(ini, fin) for ini, fin in rangos]
+
+
+def _cache_utilizable(cache_dir, data):
+    """
+    Una entrada solo sirve si su imagen anotada sigue en disco -- si no, la Vista del
+    Documento saldria rota y es preferible volver a escanear esa pagina.
+    """
+    if not isinstance(data, dict) or not data.get("page_data"):
+        return False
+    url = data.get("image_url") or ""
+    if not url:
+        return False
+    return os.path.isfile(os.path.join(cache_dir, url.rsplit("/", 1)[-1]))
+
+
 def run_audit_background(
     task_id: str,
     excel_bytes: bytes,
@@ -711,8 +952,16 @@ def run_audit_background(
     pdf_filename: str = None
 ):
     started_at = time.time()
+    # Ritmo de corridas anteriores en esta maquina: sirve para dar una estimacion desde
+    # el primer segundo, antes de tener datos de ESTA corrida. Puede ser None la primera
+    # vez que se usa la app.
+    try:
+        ritmo_historico = db.segundos_por_pagina_historico()
+    except Exception:
+        ritmo_historico = None
     try:
         tasks_db[task_id]["status"] = "processing"
+        tasks_db[task_id]["_started_at"] = started_at
 
         # 1. Parse Excel
         df_raw = pd.read_excel(io.BytesIO(excel_bytes), header=None)
@@ -735,6 +984,36 @@ def run_audit_background(
         
         poppler_path = _resolver_poppler_path()
 
+        # Antes de convertir o escanear nada: ver que paginas de este mismo PDF (mismo
+        # contenido, mismo dpi, mismo filtro) ya se escanearon en alguna corrida previa.
+        # Las que esten cacheadas no se convierten NI se pasan por OCR.
+        pdf_hash = _hash_pdf(pdf_bytes)
+        cache_dir = os.path.join(BASE_DIR, "static", CACHE_IMG_DIRNAME)
+        os.makedirs(cache_dir, exist_ok=True)
+        try:
+            paginas_cacheadas = db.get_cached_pages(pdf_hash, pdf_dpi, img_filter, start_page, end_page)
+            paginas_cacheadas = {
+                pagina: data for pagina, data in paginas_cacheadas.items()
+                if _cache_utilizable(cache_dir, data)
+            }
+        except Exception as cache_err:
+            # El cache es una optimizacion: si falla, se escanea todo como siempre.
+            print(f"Advertencia: no se pudo leer el cache de OCR: {cache_err}")
+            paginas_cacheadas = {}
+
+        if paginas_cacheadas:
+            try:
+                db.touch_cache_ocr(pdf_hash, pdf_dpi, img_filter, start_page, end_page)
+            except Exception:
+                pass
+
+        paginas_a_procesar = [p for p in pages_range if p not in paginas_cacheadas]
+        # Progreso y ETA se miden contra lo que HAY QUE escanear, no contra el total del
+        # rango: si 40 de 42 paginas salen del cache, la barra tiene que reflejar eso.
+        total_a_escanear = len(paginas_a_procesar)
+        tasks_db[task_id]["cached_pages"] = len(paginas_cacheadas)
+        tasks_db[task_id]["scanned_pages"] = total_a_escanear
+
 
         # Convertir el PDF a imagenes en bloques (no todo de una sola vez): con DPI alto
         # o PDFs largos, convertir TODO antes de reportar cualquier progreso podia tardar
@@ -750,33 +1029,55 @@ def run_audit_background(
         #   todo a escala de grises internamente, asi que no se pierde nada para el
         #   reconocimiento; el unico efecto visible es que la imagen en "Vista del
         #   Documento Analizado" deja de verse a color (decision tomada con el usuario).
-        pdf_images = []
+        # Las imagenes van indexadas POR NUMERO DE PAGINA (antes era una lista corrida
+        # desde start_page): con el cache los tramos a convertir pueden tener huecos.
+        imagenes_por_pagina = {}
         CONVERSION_CHUNK_SIZE = 20
         poppler_threads = min(4, os.cpu_count() or 4)
-        tasks_db[task_id]["status_detail"] = f"Convirtiendo {total_to_process} página(s) del PDF a imágenes (DPI {pdf_dpi})..."
-        try:
-            from pdf2image import convert_from_bytes
-            pagina_actual = start_page
-            while pagina_actual <= end_page:
-                fin_bloque = min(pagina_actual + CONVERSION_CHUNK_SIZE - 1, end_page)
-                pdf_images.extend(convert_from_bytes(
-                    pdf_bytes,
-                    dpi=pdf_dpi,
-                    first_page=pagina_actual,
-                    last_page=fin_bloque,
-                    poppler_path=poppler_path,
-                    thread_count=poppler_threads,
-                    grayscale=True,
-                ))
-                tasks_db[task_id]["progress"] = int((len(pdf_images) / total_to_process) * 40)
-                tasks_db[task_id]["status_detail"] = f"Convirtiendo PDF a imágenes... ({len(pdf_images)}/{total_to_process} páginas)"
-                pagina_actual = fin_bloque + 1
-        except Exception as e:
-            # Fallback si la conversion en bloque falla: cada pagina se convierte
-            # individualmente mas adelante (mas lento, pero sigue funcionando).
-            pdf_images = []
+        if not paginas_a_procesar:
+            tasks_db[task_id]["progress"] = 40
+            tasks_db[task_id]["status_detail"] = f"Las {total_to_process} página(s) ya estaban escaneadas: recuperándolas..."
+        else:
+            if paginas_cacheadas:
+                tasks_db[task_id]["status_detail"] = f"{len(paginas_cacheadas)} página(s) ya escaneadas; convirtiendo las {total_a_escanear} restantes (DPI {pdf_dpi})..."
+            else:
+                tasks_db[task_id]["status_detail"] = f"Convirtiendo {total_a_escanear} página(s) del PDF a imágenes (DPI {pdf_dpi})..."
+            try:
+                from pdf2image import convert_from_bytes
+                for tramo_ini, tramo_fin in _rangos_contiguos(paginas_a_procesar):
+                    pagina_actual = tramo_ini
+                    while pagina_actual <= tramo_fin:
+                        fin_bloque = min(pagina_actual + CONVERSION_CHUNK_SIZE - 1, tramo_fin)
+                        bloque = convert_from_bytes(
+                            pdf_bytes,
+                            dpi=pdf_dpi,
+                            first_page=pagina_actual,
+                            last_page=fin_bloque,
+                            poppler_path=poppler_path,
+                            thread_count=poppler_threads,
+                            grayscale=True,
+                        )
+                        for offset, imagen in enumerate(bloque):
+                            imagenes_por_pagina[pagina_actual + offset] = imagen
+                        convertidas = len(imagenes_por_pagina)
+                        tasks_db[task_id]["progress"] = int((convertidas / total_a_escanear) * 40)
+                        tasks_db[task_id]["status_detail"] = f"Convirtiendo PDF a imágenes... ({convertidas}/{total_a_escanear} páginas)"
+                        # Mientras se convierte todavia no hay ritmo de OCR medido, asi que la
+                        # estimacion se apoya en el historial de la maquina (ver
+                        # segundos_por_pagina_historico). Se afina sola apenas empiece el OCR.
+                        if ritmo_historico:
+                            tasks_db[task_id]["_eta_total_estimado"] = ritmo_historico * total_a_escanear
+                        pagina_actual = fin_bloque + 1
+            except Exception as e:
+                # Fallback si la conversion en bloque falla: cada pagina se convierte
+                # individualmente mas adelante (mas lento, pero sigue funcionando).
+                imagenes_por_pagina = {}
 
-        tasks_db[task_id]["status_detail"] = "Leyendo cédulas con OCR..."
+        if total_a_escanear:
+            tasks_db[task_id]["status_detail"] = "Leyendo cédulas con OCR..."
+        # A partir de aqui empieza la fase pesada. Se marca el inicio para poder medir
+        # el ritmo REAL de esta corrida y con eso estimar lo que falta.
+        ocr_started_at = time.time()
 
         # Define a helper function to process a single page (OCR + drawing)
         def process_page_task(page_num, pre_rendered):
@@ -836,10 +1137,12 @@ def run_audit_background(
                 import cv2
                 import numpy as np
                 from PIL import Image
-                
-                # Make sure uploads dir exists
-                uploads_dir = os.path.join(BASE_DIR, "static", "uploads")
-                os.makedirs(uploads_dir, exist_ok=True)
+
+                # La imagen anotada se guarda en static/ocr_cache/ con el hash del PDF en
+                # el nombre (antes iba a static/uploads/ con el task_id). Dos motivos: la
+                # comparte cualquier corrida futura del mismo PDF, y la limpieza horaria
+                # de uploads/ no se la lleva puesta.
+                os.makedirs(cache_dir, exist_ok=True)
                 
                 # Use pre-rendered or convert page
                 if pre_rendered is not None:
@@ -850,8 +1153,8 @@ def run_audit_background(
                     img_pil = images[0] if images else None
                     
                 if img_pil:
-                    image_filename = f"ocr_{task_id}_{page_num}.jpg"
-                    image_path = os.path.join(uploads_dir, image_filename)
+                    image_filename = _nombre_imagen_cache(pdf_hash, pdf_dpi, img_filter, page_num)
+                    image_path = os.path.join(cache_dir, image_filename)
                     
                     if metodo_origen == "OCR" and ocr_result:
                         # Preprocess image to get scale factor
@@ -887,7 +1190,7 @@ def run_audit_background(
                         # Just save clean image
                         img_pil.save(image_path, "JPEG")
                         
-                    image_url = f"/uploads/{image_filename}"
+                    image_url = f"/{CACHE_IMG_DIRNAME}/{image_filename}"
             except Exception as e:
                 pass
                 
@@ -905,29 +1208,78 @@ def run_audit_background(
             }
             
         # Execute the page tasks in parallel!
+        # Una pagina por core: el trabajo pesado es el OCR, que ademas usa 2 hilos por
+        # inferencia (ver OCR_INTRA_OP_THREADS en src/ocr.py). Esa sobresuscripcion a
+        # proposito midio mejor que ajustarse justo al numero de cores, porque la
+        # inferencia no mantiene la CPU ocupada el 100% del tiempo. El tope evita que en
+        # un servidor con muchisimos cores se lancen cientos de hilos peleandose.
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        max_threads = min(4, os.cpu_count() or 4)
+        max_threads = min(os.cpu_count() or 4, 12)
         
         # We need to preserve the order or sort the final audit_results list by page number
         task_results = []
-        
+
+        # Las paginas que salieron del cache se integran primero y en orden de pagina: no
+        # cuestan nada y asi las tarjetas de la Consola aparecen en el mismo orden que
+        # tendrian en una corrida normal.
+        for page_num in sorted(paginas_cacheadas):
+            res_cacheado = paginas_cacheadas[page_num]
+            task_results.append(res_cacheado)
+            try:
+                _integrar_resultado_en_live_results(task_id, res_cacheado)
+            except Exception as ex:
+                print(f"Error integrando la página {page_num} desde el cache: {ex}")
+        if paginas_cacheadas:
+            tasks_db[task_id]["current_page"] = max(paginas_cacheadas)
+
         with ThreadPoolExecutor(max_workers=max_threads) as executor:
             futures = {}
-            for page_num in pages_range:
-                pre_rendered = None
-                if pdf_images and 0 <= (page_num - start_page) < len(pdf_images):
-                    pre_rendered = pdf_images[page_num - start_page]
-                
+            for page_num in paginas_a_procesar:
+                pre_rendered = imagenes_por_pagina.get(page_num)
+
                 future = executor.submit(process_page_task, page_num, pre_rendered)
                 futures[future] = page_num
                 
+            # Cuantas paginas terminadas hacen falta antes de fiarse del ritmo medido
+            # (ver el detalle mas abajo). En lotes mas chicos que el numero de hilos se
+            # baja el listón, para que igual llegue a estimar algo.
+            umbral_ritmo = max(2, min(max_threads, total_a_escanear or 1))
             completed_count = 0
             for future in as_completed(futures):
                 p_num = futures[future]
                 completed_count += 1
                 
                 # Update progress (40-90%: 0-40% ya se uso para convertir el PDF a imagenes)
-                tasks_db[task_id]["progress"] = 40 + int((completed_count / total_to_process) * 50)
+                tasks_db[task_id]["progress"] = 40 + int((completed_count / max(total_a_escanear, 1)) * 50)
+
+                # Se guarda el TOTAL estimado de la corrida, no el restante: asi el
+                # endpoint de estado puede restarle el tiempo ya transcurrido en cada
+                # consulta y el contador baja segundo a segundo. Guardar directamente el
+                # restante lo dejaba congelado entre pagina y pagina -- con varios hilos
+                # las paginas terminan en oleadas, y el numero se quedaba quieto ~15s y
+                # luego pegaba saltos.
+                #
+                # El ritmo sale del OCR REAL de esta corrida, que es lo que hace fiable
+                # la estimacion: no supone nada del equipo, ni del DPI, ni de si las
+                # paginas traen texto embebido.
+                #
+                # Se espera a tener una OLEADA completa de paginas terminadas (tantas
+                # como hilos) antes de hacerle caso al ritmo medido. Con N hilos las
+                # paginas no terminan de a una sino en oleadas, y medir a mitad de la
+                # primera oleada reparte el tiempo de N paginas entre las 2 o 3 que ya
+                # acabaron: el ritmo sale inflado y la estimacion pegaba un salto (se
+                # midio un pico de 62s restantes cuando faltaban 26s reales).
+                if completed_count >= umbral_ritmo:
+                    ritmo_real = (time.time() - ocr_started_at) / completed_count
+                    tiempo_conversion = ocr_started_at - started_at
+                    nuevo_total = tiempo_conversion + ritmo_real * total_a_escanear
+                    # Promedio suavizado con lo que ya se creia: amortigua los saltos
+                    # cuando una oleada entra de golpe, sin dejar de converger al valor
+                    # real a medida que avanza la corrida.
+                    anterior = tasks_db[task_id].get("_eta_total_estimado")
+                    if anterior:
+                        nuevo_total = 0.7 * anterior + 0.3 * nuevo_total
+                    tasks_db[task_id]["_eta_total_estimado"] = nuevo_total
                 # Las paginas se procesan en paralelo (varios hilos), asi que terminan en
                 # el orden en que cada una acaba y NO en orden de pagina -- se ve saltado
                 # en el indicador si mostramos la ultima que termino sin mas. Usamos el
@@ -939,73 +1291,15 @@ def run_audit_background(
                     res = future.result()
                     task_results.append(res)
                     
-                    # Update live results database (grouping by Document ID) in real-time
-                    if "live_results" not in tasks_db[task_id]:
-                        tasks_db[task_id]["live_results"] = []
-                        
-                    # Mismo identificador (real o "Sujeto_Pag_N") que ya quedo calculado
-                    # en page_data, para que la tarjeta de la Consola y la fila de
-                    # conciliacion de esta pagina usen exactamente el mismo valor.
-                    doc_str = res["page_data"]["Documento_OCR"]
-                        
-                    existing_idx = None
-                    for j, live_res in enumerate(tasks_db[task_id]["live_results"]):
-                        if live_res["document"] == doc_str:
-                            existing_idx = j
-                            break
-                            
-                    datos_res = res.get("datos") or {}
-                    campos_nuevos = ("tipo_documento", "lugar_nacimiento", "sexo",
-                                      "estatura", "grupo_sanguineo", "fecha_lugar_expedicion")
+                    _integrar_resultado_en_live_results(task_id, res)
 
-                    if existing_idx is not None:
-                        existing = tasks_db[task_id]["live_results"][existing_idx]
-                        name_curr = str(res["name_detected"]).strip() if res["name_detected"] else ""
-                        if len(name_curr) > len(existing["name"]):
-                            existing["name"] = name_curr
-                        date_curr = str(res["date_detected"]).strip()
-                        date_changed = False
-                        if date_curr and date_curr != "None" and (not existing["date"] or existing["date"] == "None"):
-                            existing["date"] = date_curr
-                            date_changed = True
-                        if res["page_num"] not in existing["pages"]:
-                            existing["pages"].append(res["page_num"])
-                            existing["images"].append({"page": res["page_num"], "url": res["image_url"]})
-                        if res["cara_detected"] not in existing["sides"]:
-                            existing["sides"].append(res["cara_detected"])
-                        if "Anverso (Frente)" in existing["sides"] and "Reverso (Atrás)" in existing["sides"]:
-                            existing["side"] = "Ambas Caras (Completo)"
-                        else:
-                            existing["side"] = res["cara_detected"] if res["cara_detected"] != "No detectado" else existing["side"]
-                        existing["raw_text"] += f"\n\n--- [PÁGINA {res['page_num']}] ---\n\n{res['full_text']}"
-
-                        # Los campos nuevos suelen aparecer en una sola cara (p. ej. reverso);
-                        # se rellenan solo si aun estan vacios, igual que la fecha.
-                        for campo in campos_nuevos:
-                            valor_nuevo = datos_res.get(campo)
-                            if valor_nuevo and not existing.get(campo):
-                                existing[campo] = valor_nuevo
-                        if date_changed or not existing.get("edad"):
-                            existing["edad"] = calcular_edad(existing["date"])
-                    else:
-                        nueva_entrada = {
-                            "document": doc_str,
-                            "name": str(res["name_detected"]).strip() if res["name_detected"] else "",
-                            "date": str(res["date_detected"]).strip() if res["date_detected"] else "",
-                            "side": res["cara_detected"],
-                            "sides": [res["cara_detected"]],
-                            "method": res["metodo_origen"],
-                            "pages": [res["page_num"]],
-                            "images": [{"page": res["page_num"], "url": res["image_url"]}],
-                            "raw_text": res["full_text"],
-                            "edad": datos_res.get("edad"),
-                        }
-                        for campo in campos_nuevos:
-                            nueva_entrada[campo] = datos_res.get(campo)
-                        tasks_db[task_id]["live_results"].append(nueva_entrada)
-                        
-                    # Save current page text for live log
-                    tasks_db[task_id]["current_page_text"] = res["full_text"]
+                    # Recien escaneada: al cache, para que la proxima vez que suban este
+                    # mismo PDF esta pagina no se vuelva a procesar. Si el guardado falla
+                    # no pasa nada grave -- se pierde el ahorro, no el resultado.
+                    try:
+                        db.save_cached_page(pdf_hash, pdf_dpi, img_filter, p_num, res)
+                    except Exception as cache_err:
+                        print(f"Advertencia: no se pudo cachear la página {p_num}: {cache_err}")
                     
                 except Exception as ex:
                     print(f"Error procesando resultado de página {p_num}: {ex}")
@@ -1095,7 +1389,8 @@ def run_audit_background(
             df_excel_clean['Nombre_Base'] = df_excel_clean[col_fallback].fillna('').astype(str).str.upper().str.strip()
             
         tasks_db[task_id]["progress"] = 90
-        
+        tasks_db[task_id]["eta_seconds"] = 0  # ya no queda OCR pendiente
+
         # 4. Reconciliación + reporte (función reusable, la vuelve a llamar el endpoint de edición)
         # El cronometro se corta aqui, justo antes de conciliar/escribir el reporte --
         # esos dos pasos son rapidos (pandas + openpyxl en memoria) comparado con el OCR,
@@ -1146,6 +1441,10 @@ def run_audit_background(
             "key_col": key_col,
             "compare_cols": compare_cols,
             "similarity_threshold": similarity_threshold,
+            # Clave del cache de OCR de esta corrida: la necesita el endpoint de edicion
+            # para dejar las correcciones a mano guardadas junto al escaneo (ver
+            # _guardar_correccion_en_cache).
+            "cache_ocr": {"pdf_hash": pdf_hash, "dpi": pdf_dpi, "img_filter": img_filter},
             "run_meta_base": {
                 "excel_filename": excel_filename,
                 "pdf_filename": pdf_filename,
@@ -1172,6 +1471,12 @@ def run_audit_background(
                 report_bytes=formatted_report_bytes,
                 pdf_url=tasks_db[task_id].get("pdf_url"),
                 elapsed_seconds=elapsed_seconds,
+                scanned_pages=total_a_escanear,
+                # Con que clave quedo escaneado este PDF: es lo que permite borrar su
+                # cache si despues se elimina la auditoria del historial.
+                pdf_hash=pdf_hash,
+                pdf_dpi=pdf_dpi,
+                img_filter=img_filter,
             )
         except Exception as db_err:
             print(f"Advertencia: no se pudo guardar la auditoría {task_id} en el historial: {db_err}")
@@ -1206,9 +1511,17 @@ async def start_audit(
         excel_bytes = await excel_file.read()
         pdf_bytes = await pdf_file.read()
         
-        # Create uploads folder and clean up older files (pero sin tocar las imagenes
+        # Create uploads folder and clean up older files (pero sin tocar los archivos
         # de auditorias ya guardadas en el historial -- si no, una auditoria reabierta
         # despues de una hora mostraria imagenes rotas)
+        #
+        # OJO con los dos nombres distintos que conviven en esta carpeta:
+        #   ocr_<task_id>_<pagina>.jpg  -> imagenes anotadas (las de auditorias viejas;
+        #                                  las nuevas ya viven en static/ocr_cache/)
+        #   <task_id>.pdf              -> el PDF que subio el usuario, que alimenta el visor
+        # Antes la excepcion solo contemplaba el .jpg, asi que el .pdf de una auditoria
+        # guardada se borraba igual al cumplir la hora y el visor quedaba en 404 al
+        # reabrirla desde el historial.
         uploads_dir = os.path.join(BASE_DIR, "static", "uploads")
         os.makedirs(uploads_dir, exist_ok=True)
         try:
@@ -1219,13 +1532,25 @@ async def start_audit(
                 filepath = os.path.join(uploads_dir, filename)
                 if not os.path.isfile(filepath) or os.stat(filepath).st_mtime >= now - 3600:
                     continue
-                match = re.match(r'ocr_([0-9a-fA-F\-]{36})_\d+\.jpg$', filename)
+                match = re.match(r'(?:ocr_)?([0-9a-fA-F\-]{36})(?:_\d+\.jpg|\.pdf)$', filename)
                 if match and match.group(1) in persisted_ids:
                     continue
                 os.remove(filepath)
         except Exception:
             pass
             
+        # Purga del cache de OCR: lo que no se usa hace mas de 30 dias se borra (fila +
+        # imagen), asi static/ocr_cache/ no crece indefinidamente. Un PDF de 500 paginas
+        # deja 500 jpg; sin esto el disco se llena solo.
+        try:
+            cache_dir = os.path.join(BASE_DIR, "static", CACHE_IMG_DIRNAME)
+            for nombre_img in db.purgar_cache_ocr(dias=30):
+                ruta_img = os.path.join(cache_dir, nombre_img)
+                if os.path.isfile(ruta_img):
+                    os.remove(ruta_img)
+        except Exception:
+            pass
+
         pdf_path = os.path.join(uploads_dir, f"{task_id}.pdf")
         with open(pdf_path, "wb") as f:
             f.write(pdf_bytes)
@@ -1235,6 +1560,7 @@ async def start_audit(
             "progress": 0,
             "current_page": 0,
             "total_pages": end_page - start_page + 1,
+            "eta_seconds": None,  # se llena en cuanto hay con que estimar (ver run_audit_background)
             "pdf_url": f"/uploads/{task_id}.pdf"
         }
         
@@ -1264,7 +1590,17 @@ async def start_audit(
 async def get_status(task_id: str):
     if task_id not in tasks_db:
         raise HTTPException(status_code=404, detail="Tarea no encontrada")
-    return tasks_db[task_id]
+
+    task = tasks_db[task_id]
+    # El restante se calcula AQUI, en cada consulta, restandole al total estimado el
+    # tiempo ya transcurrido -- asi baja de forma continua aunque las paginas terminen
+    # en oleadas (ver el comentario en run_audit_background).
+    if task.get("status") in ("processing", "queued"):
+        total_estimado = task.get("_eta_total_estimado")
+        inicio = task.get("_started_at")
+        if total_estimado and inicio:
+            task["eta_seconds"] = max(0, round(total_estimado - (time.time() - inicio)))
+    return task
 
 @app.get("/api/download/{task_id}")
 async def download_report(task_id: str):
@@ -1297,10 +1633,95 @@ async def get_history_detail(task_id: str):
 
 @app.delete("/api/history/{task_id}")
 async def delete_history_entry(task_id: str):
+    # La clave del cache hay que leerla ANTES de borrar la fila: despues ya no queda de
+    # donde deducir que paginas de ocr_cache eran de esta auditoria.
+    clave_cache = db.get_audit_cache_key(task_id)
+
     if not db.delete_audit(task_id):
         raise HTTPException(status_code=404, detail="Auditoría no encontrada en el historial")
     generated_reports.pop(task_id, None)
-    return {"deleted": True}
+
+    # Borrar la auditoria tiene que borrar tambien su escaneo cacheado; si no, volver a
+    # subir el mismo PDF seguiria saliendo del cache y no habria forma de reprocesarlo.
+    cache = _borrar_cache_ocr_de_auditoria(clave_cache, task_id)
+
+    return {"deleted": True, **cache}
+
+# Como se llama cada campo editable en cada una de las tres capas: la tarjeta de la
+# Consola (live_results), la fila que va al reporte (page_data) y el dict crudo del
+# parser (datos). Se usa para que una correccion hecha a mano quede tambien guardada en
+# el cache de OCR.
+_CAMPOS_LIVE_A_PAGE_DATA = {
+    "document": "Documento_OCR",
+    "name": "Nombre_OCR",
+    "date": "Fecha_Nacimiento_OCR",
+    "tipo_documento": "Tipo_Documento_OCR",
+    "lugar_nacimiento": "Lugar_Nacimiento_OCR",
+    "sexo": "Sexo_OCR",
+    "estatura": "Estatura_OCR",
+    "grupo_sanguineo": "Grupo_Sanguineo_OCR",
+    "fecha_lugar_expedicion": "Fecha_Lugar_Expedicion_OCR",
+    "edad": "Edad_OCR",
+}
+_CAMPOS_LIVE_A_DATOS = {
+    "document": "documento",
+    "name": "nombre_completo",
+    "date": "fecha_nacimiento",
+    "tipo_documento": "tipo_documento",
+    "lugar_nacimiento": "lugar_nacimiento",
+    "sexo": "sexo",
+    "estatura": "estatura",
+    "grupo_sanguineo": "grupo_sanguineo",
+    "fecha_lugar_expedicion": "fecha_lugar_expedicion",
+    "edad": "edad",
+}
+_CAMPOS_LIVE_A_DETECTADO = {
+    "document": "doc_detected",
+    "name": "name_detected",
+    "date": "date_detected",
+}
+
+
+def _guardar_correccion_en_cache(task_id, entry):
+    """
+    Deja la correccion hecha a mano guardada en el cache de OCR, en las paginas de esa
+    cedula. Asi, si mas adelante se vuelve a subir el mismo PDF, el dato ya sale
+    corregido y no hay que repetir el trabajo manual.
+
+    Contrapartida asumida a proposito: el cache deja de ser un espejo exacto de lo que
+    dice el PDF. Si la correccion estuvo mal, el error se arrastra a las corridas
+    siguientes hasta que se vuelva a corregir (o se cambie el dpi/filtro, que es otra
+    clave de cache y fuerza un escaneo limpio).
+
+    No se sincroniza el texto crudo (Texto_Completo): ese sigue siendo lo que leyo el
+    OCR, que es justamente lo que sirve para auditar de donde salio el dato.
+    """
+    ctx = task_reconcile_context.get(task_id) or {}
+    clave = ctx.get("cache_ocr")
+    if not clave:
+        return
+
+    for pagina in entry.get("pages") or []:
+        try:
+            data = db.get_cached_pages(
+                clave["pdf_hash"], clave["dpi"], clave["img_filter"], pagina, pagina
+            ).get(pagina)
+            if not data:
+                continue
+
+            page_data = data.setdefault("page_data", {})
+            datos = data.setdefault("datos", {})
+            for campo, columna in _CAMPOS_LIVE_A_PAGE_DATA.items():
+                valor = entry.get(campo)
+                page_data[columna] = "" if valor is None else str(valor).strip()
+                datos[_CAMPOS_LIVE_A_DATOS[campo]] = valor
+            for campo, clave_detectado in _CAMPOS_LIVE_A_DETECTADO.items():
+                data[clave_detectado] = entry.get(campo)
+
+            db.save_cached_page(clave["pdf_hash"], clave["dpi"], clave["img_filter"], pagina, data)
+        except Exception as err:
+            print(f"Advertencia: no se pudo guardar la corrección de la página {pagina} en el cache: {err}")
+
 
 @app.put("/api/task/{task_id}/records/{document}")
 async def edit_record(task_id: str, document: str, edits: dict = Body(...)):
@@ -1343,6 +1764,10 @@ async def edit_record(task_id: str, document: str, edits: dict = Body(...)):
             _fusionar_entradas_live_results(duplicado, entry)
             live_results.remove(entry)
             entry = duplicado
+
+    # La correccion tambien va al cache de OCR de este PDF (decision del usuario: que el
+    # cache devuelva el dato ya corregido y no haya que volver a arreglarlo a mano).
+    _guardar_correccion_en_cache(task_id, entry)
 
     ctx = task_reconcile_context[task_id]
     df_ocr = _construir_df_ocr_desde_live_results(live_results)
@@ -1390,6 +1815,10 @@ async def edit_record(task_id: str, document: str, edits: dict = Body(...)):
             report_bytes=formatted_report_bytes,
             pdf_url=tasks_db[task_id].get("pdf_url"),
             elapsed_seconds=tasks_db[task_id].get("elapsed_seconds"),
+            scanned_pages=tasks_db[task_id].get("scanned_pages"),
+            pdf_hash=ctx["cache_ocr"]["pdf_hash"],
+            pdf_dpi=ctx["cache_ocr"]["dpi"],
+            img_filter=ctx["cache_ocr"]["img_filter"],
         )
     except Exception as db_err:
         print(f"Advertencia: no se pudo actualizar la auditoría {task_id} en el historial: {db_err}")

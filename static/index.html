@@ -221,6 +221,19 @@
             </div>
         </div>
 
+        <!-- Raw OCR Text Modal (se abre con el boton "Ver texto OCR" de cada tarjeta) -->
+        <div class="modal-overlay hidden" id="raw_text_modal_overlay">
+            <div class="modal card" id="raw_text_modal">
+                <div class="modal-header">
+                    <h2><svg class="icon"><use href="#icon-file-text"/></svg> Texto OCR crudo — <span id="raw_text_modal_subtitle"></span></h2>
+                    <button type="button" class="btn-icon-only" id="close_raw_text_btn" title="Cerrar">
+                        <svg class="icon"><use href="#icon-x"/></svg>
+                    </button>
+                </div>
+                <pre class="raw-text-content" id="raw_text_modal_content"></pre>
+            </div>
+        </div>
+
         <!-- Main Workspace -->
         <main class="workspace">
             <!-- Main Content Area -->
@@ -296,6 +309,10 @@
                         <button class="btn btn-primary btn-large" id="start_audit_btn">
                             <svg class="icon"><use href="#icon-play"/></svg> Iniciar Validación por OCR (RapidOCR)
                         </button>
+                        <p class="estimacion-tiempo hidden" id="estimacion_tiempo">
+                            <svg class="icon"><use href="#icon-clock"/></svg>
+                            <span id="estimacion_tiempo_texto"></span>
+                        </p>
                     </div>
                 </div>
 
@@ -349,6 +366,7 @@
                             <h3 id="progress_status">Analizando documentos...</h3>
                             <div class="progress-info-right">
                                 <span class="elapsed-timer" id="elapsed_timer"><svg class="icon"><use href="#icon-clock"/></svg> 0s</span>
+                                <span class="eta-restante hidden" id="eta_restante"></span>
                                 <span id="progress_percent">0%</span>
                             </div>
                         </div>

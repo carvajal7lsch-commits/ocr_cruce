@@ -6,12 +6,24 @@ from rapidfuzz import fuzz
 # Regex compilados una sola vez a nivel de módulo
 PATRON_DOC_BARCODE = re.compile(r'-(\d{6,10})-\d{8}\b')
 PATRON_DOC_GENERICO = re.compile(r'\b\d{1,3}(?:\.?\d{3}){2,3}\b')
+# Variante con los puntos OBLIGATORIOS: es el formato en que la cedula imprime el numero
+# en el frente ("1.110.461.846"), en letra grande. Sirve para distinguirlo de la linea
+# densa del reverso, donde los digitos van corridos y esta no matchea.
+PATRON_DOC_FRENTE = re.compile(r'\b\d{1,3}(?:\.\d{3}){2,3}\b')
 PATRON_FECHA = re.compile(r'\b\d{2}[-/\.]\d{2}[-/\.]\d{4}\b')
-# Fecha de nacimiento viene como "26-JUN-1986" o "26 NOV 1986" (mes abreviado, permite espacio/guión/barra opcionales)
+# Fecha con mes en letras: "26-JUN-1986", "26 NOV 1986" o "08 MAYO 1987". El mes admite
+# de 3 a 10 letras porque no todas las cedulas lo abrevian -- algunas lo escriben
+# completo ("MAYO", "SEPTIEMBRE"), y exigir exactamente 3 hacia que esas fechas no se
+# detectaran en absoluto.
+_MES_EN_LETRAS = r'[A-ZÁÉÍÓÚ]{3,10}'
 PATRON_FECHA_NAC = re.compile(
-    r'FECHA DE NACIMIENTO\D{0,15}(\d{2}[- /]?[A-ZÁÉÍÓÚ]{3}[- /]?\d{4})',
+    r'FECHA DE NACIMIENTO\D{0,15}(\d{2}[- /]?' + _MES_EN_LETRAS + r'[- /]?\d{4})',
     re.IGNORECASE
 )
+# La MISMA forma de fecha pero suelta, sin la etiqueta pegada -- se usa para buscarla en
+# las lineas vecinas a la etiqueta cuando el OCR la dejo separada de esta (ver
+# extraer_fecha_nacimiento).
+PATRON_FECHA_MES_SUELTA = re.compile(r'\b(\d{2}[- /]?' + _MES_EN_LETRAS + r'[- /]?\d{4})\b')
 
 # Tipo de documento: se busca la frase de encabezado completa, en orden de especificidad
 # (tarjeta/extranjeria antes que ciudadania para no dar por sentado el caso mas comun).
@@ -21,9 +33,12 @@ PATRON_TIPO_CIUDADANIA = re.compile(r'C[EÉ]DULA\s+DE\s+CIUDADAN[IÍ]A', re.IGNO
 # Documento provisional que expide la Registraduría mientras se entrega la cédula física.
 PATRON_TIPO_CONTRASENA = re.compile(r'CONTRASE[ÑN]A', re.IGNORECASE)
 
-# Fecha y lugar de expedicion: "15-OCT-2004 FLORENCIA"
+# Fecha y lugar de expedicion: "15-OCT-2004 FLORENCIA".
+# El separador entre la fecha y la ciudad es OPCIONAL (y admite coma) a proposito: el OCR
+# a veces las pega sin espacio ("28-JUL-2005IBAGUE") o las separa con coma
+# ("17 JUL 2024, FLORENCIA"); exigir un espacio hacia que el campo se perdiera entero.
 PATRON_FECHA_LUGAR_EXP = re.compile(
-    r'(\d{2}[-\s/]?[A-ZÁÉÍÓÚ]{3}[-\s/]?\d{4})\s+([A-ZÁÉÍÓÚÑ ]{3,})'
+    r'(\d{2}[-\s/]?' + _MES_EN_LETRAS + r'[-\s/]?\d{4})[\s,]*([A-ZÁÉÍÓÚÑ ]{3,})'
 )
 
 # Estatura / Grupo sanguineo (RH) / Sexo: se identifican por FORMA de contenido, no por
@@ -31,16 +46,30 @@ PATRON_FECHA_LUGAR_EXP = re.compile(
 # seguidos de sus tres etiquetas en la fila siguiente (box-sorting del OCR), asi que un
 # lookback de una sola linea no permite saber con certeza cual valor es cual.
 PATRON_ESTATURA = re.compile(r'\b([12]\.\d{2})\b')             # "1.71" (acotado para no matchear "1.117...")
-PATRON_RH = re.compile(r'\b(AB|A|B|O)[+-](?!\w)')              # "B+" (AB antes que A/B; sin \b final porque
-                                                                 # "+"/"-" al final de línea no genera boundary)
+# Grupo sanguineo (RH). La forma canonica es "O+" (letra y despues signo), pero el OCR
+# devuelve el mismo dato de otras tres maneras, todas vistas en cedulas reales: da vuelta
+# el orden ("+O") y lee la O como un cero ("+0", "0+") -- la tipografia de la cedula las
+# hace casi identicas. Se aceptan las cuatro y se normalizan a "O+" (ver _normalizar_rh):
+# si no, el campo salia vacio aunque estuviera perfectamente legible.
+# AB va antes que A/B para que no gane el prefijo; sin \b final porque un "+"/"-" al
+# terminar la linea no genera boundary.
+PATRON_RH = re.compile(r'\b(AB|A|B|O|0)([+-])(?!\w)')                  # "B+", "0+"
+PATRON_RH_INVERTIDO = re.compile(r'(?<!\w)([+-])(AB|A|B|O|0)(?!\w)')   # "+B", "+0"
 PATRON_SEXO = re.compile(r'^(M|F)$')                            # solo si la linea COMPLETA es "M" o "F"
+# Sexo dentro de la zona MRZ (la linea legible por maquina del reverso), que lo trae en
+# una posicion fija: 7 digitos (fecha de nacimiento + digito de control), la M o la F, y
+# otros 7 (fecha de expiracion + control) -- p. ej. "8705080F3302244C0L...". Sirve de
+# respaldo cuando el campo impreso "Sexo" no quedo legible en el OCR.
+PATRON_MRZ_SEXO = re.compile(r'\d{7}([MF])\d{7}')
 
 # Fecha de nacimiento -> edad calculada
 MESES_ES = {
     "ENE": 1, "FEB": 2, "MAR": 3, "ABR": 4, "MAY": 5, "JUN": 6,
     "JUL": 7, "AGO": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DIC": 12,
 }
-PATRON_FECHA_PARSEABLE = re.compile(r'(\d{2})[-\s/]?([A-Z]{3})[-\s/]?(\d{4})')
+# El mes se captura completo (3-10 letras) y luego se recorta a 3 para buscarlo en
+# MESES_ES, asi sirve igual "MAY" que "MAYO" o "SEPTIEMBRE".
+PATRON_FECHA_PARSEABLE = re.compile(r'(\d{2})[-\s/]?([A-ZÁÉÍÓÚ]{3,10})[-\s/]?(\d{4})')
 
 KEYWORDS_EXCLUIR = (
     "REPÚBLICA", "REPUBLICA", "CEDULA", "CÉDULA", "CIUDADANÍA", "CIUDADANIA",
@@ -50,6 +79,18 @@ KEYWORDS_EXCLUIR = (
     "NACIONALIDAD", "EXPIRACIÓN", "EXPIRACION", "NUIP", "ICCOL",
     "DIC", "ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV",
     "ESTADO", "CIVIL", "NUMERO", "NÚMERO",
+    # "COL" es el VALOR del campo Nacionalidad, no un nombre. Va aca (comparado por
+    # palabra completa) y no como subcadena: buscarlo suelto descartaba nombres reales
+    # que lo contienen -- NICOLAS, NICOLASA -- como si fueran texto de plantilla.
+    "COL",
+)
+# Se compara por PALABRA COMPLETA, no por subcadena. Las abreviaturas de mes (MAR, JUL,
+# SEP, ENE...) viven dentro de muchisimos nombres reales -- MARIA, MARTINEZ, MARQUEZ,
+# JULIANA, SEPULVEDA, ENEIDA -- y con una comparacion de subcadena esos nombres se
+# descartaban como si fueran texto de plantilla, dejando la tarjeta sin nombre aunque el
+# OCR lo hubiera leido perfecto (caso real: "MARIA EUGENIA" se perdia por el "MAR").
+_PATRON_KEYWORDS_EXCLUIR = re.compile(
+    r'\b(?:' + '|'.join(re.escape(k) for k in KEYWORDS_EXCLUIR) + r')\b'
 )
 
 # Patrón MRZ: última línea tipo APELLIDO<APELLIDO<<NOMBRE<NOMBRE<
@@ -64,6 +105,16 @@ def normalizar_texto(texto):
     for original, reemplazo in reemplazos.items():
         t = t.replace(original, reemplazo)
     return t
+
+
+def _normalizar_rh(letra, signo):
+    """
+    Deja el grupo sanguineo en su forma canonica ("O+"): la letra primero, y el cero que
+    el OCR confunde con la O convertido de vuelta a O. Asi el reporte muestra siempre la
+    misma forma sin importar como lo haya leido el OCR, y el cruce contra el Excel no
+    falla por un "+0" que en realidad era un "O+".
+    """
+    return ("O" if letra == "0" else letra) + signo
 
 
 def _es_candidato_mayusculas_plantilla(texto_original, minimo=0.8):
@@ -84,22 +135,33 @@ def _es_candidato_mayusculas_plantilla(texto_original, minimo=0.8):
         return True
     return sum(1 for c in letras if c.isupper()) / len(letras) >= minimo
 
+def similitud_etiqueta(texto_linea, target_label):
+    """
+    Mejor similitud (0-100) entre alguna palabra de la línea y la etiqueta objetivo,
+    usando difflib. Devolver el numero -- y no solo un si/no contra un umbral -- permite
+    desempatar cuando una misma linea se parece a DOS etiquetas distintas y hay que
+    quedarse con la mas parecida (ver _clasificar_linea_de_fecha).
+    """
+    texto_norm = normalizar_texto(texto_linea)
+    # Remover caracteres especiales y separar en palabras limpias
+    palabras = [re.sub(r'[^A-ZÑ]', '', w) for w in texto_norm.split() if w.strip()]
+    mejor = 0.0
+    for p in palabras:
+        if len(p) >= 4:
+            # difflib calcula un ratio de coincidencia entre 0.0 y 1.0
+            ratio = difflib.SequenceMatcher(None, p, target_label).ratio() * 100
+            if ratio > mejor:
+                mejor = ratio
+    return mejor
+
+
 def es_similar_etiqueta(texto_linea, target_label, threshold=70):
     """
     Compara matemáticamente cada palabra de la línea con una etiqueta objetivo
     usando la librería estándar difflib (Gestor de secuencias).
     Retorna True si hay una coincidencia de similitud >= threshold.
     """
-    texto_norm = normalizar_texto(texto_linea)
-    # Remover caracteres especiales y separar en palabras limpias
-    palabras = [re.sub(r'[^A-ZÑ]', '', w) for w in texto_norm.split() if w.strip()]
-    for p in palabras:
-        if len(p) >= 4:
-            # diflib calcula un ratio de coincidencia entre 0.0 y 1.0
-            ratio = difflib.SequenceMatcher(None, p, target_label).ratio() * 100
-            if ratio >= threshold:
-                return True
-    return False
+    return similitud_etiqueta(texto_linea, target_label) >= threshold
 
 # Frases COMPLETAS fijas de la plantilla de la cédula colombiana (no cambian de un
 # documento a otro). A diferencia de labels_control/KEYWORDS_EXCLUIR (que buscan
@@ -264,7 +326,294 @@ def detectar_tipo_documento(texto):
         return "CC"
     if PATRON_TIPO_CONTRASENA.search(texto):
         return "CONTRASEÑA"
+
+    # Respaldo difuso: los patrones de arriba exigen la frase EXACTA y seguida, y eso
+    # falla en dos situaciones muy comunes:
+    #   - El OCR se come una letra ("CEDULA DE CIUDADAMIA").
+    #   - El box-sorting parte la frase en lineas separadas y mete otra en medio
+    #     ("CEDULA DE" / "REPUBLICA DE COLOMBIA" / "CIUDADANIA").
+    # Por eso se busca ademas la PALABRA distintiva de cada tipo por similitud. Las
+    # cuatro palabras son bien distintas entre si (se midieron: la mas parecida a otra
+    # queda en 38%), y "IDENTIDAD" no se confunde con el "IDENTIFICACION PERSONAL" que
+    # trae toda cedula (61%), asi que el umbral de 80 deja margen de sobra a ambos lados.
+    for linea in texto.split('\n'):
+        linea_norm = normalizar_texto(linea.strip())
+        if not linea_norm:
+            continue
+        if es_similar_etiqueta(linea_norm, "TARJETA", 80) or es_similar_etiqueta(linea_norm, "IDENTIDAD", 80):
+            return "TI"
+        if es_similar_etiqueta(linea_norm, "EXTRANJERIA", 80):
+            return "CE"
+        if es_similar_etiqueta(linea_norm, "CIUDADANIA", 80):
+            return "CC"
+        if es_similar_etiqueta(linea_norm, "CONTRASEÑA", 80):
+            return "CONTRASEÑA"
     return None
+
+def _valor_junto_a_etiqueta(lineas, idx_etiqueta, ya_tomado=""):
+    """
+    Devuelve el valor impreso que le corresponde a una etiqueta de la cedula
+    ("Apellidos" / "Nombres"): prueba las 2 lineas ANTERIORES y luego las 2 siguientes
+    -- en ese orden porque el box-sorting del OCR suele emitir el valor antes que su
+    etiqueta -- y se queda con el primer candidato que no sea texto de la plantilla,
+    otra etiqueta, ni el valor que ya se le asigno al otro campo.
+
+    Apellidos y Nombres comparten esta funcion a proposito. Antes cada uno traia su
+    propia lista de palabras a excluir y se fueron desincronizando: la de Nombres no
+    tenia "NUIP", asi que en una cedula donde el OCR dejo el NUIP entre la etiqueta
+    "Nombres" y su valor, el nombre detectado terminaba siendo "NUIP" (caso real:
+    "MURCIA ARTUNDUAGA NUIP" en vez de "MURCIA ARTUNDUAGA VANESSA ALEXANDRA").
+    """
+    candidatos_indices = [
+        idx for idx in (idx_etiqueta - 1, idx_etiqueta - 2, idx_etiqueta + 1, idx_etiqueta + 2)
+        if 0 <= idx < len(lineas)
+    ]
+    for idx in candidatos_indices:
+        candidato = re.sub(r'[^A-Za-zÁÉÍÓÚñÑ ]', '', lineas[idx]).strip()
+        candidato_upper = normalizar_texto(candidato)
+        if len(candidato) <= 2 or candidato_upper == ya_tomado:
+            continue
+        # Palabras de la plantilla o de OTRO campo de la cedula (NUIP, REPUBLICA,
+        # NACIONALIDAD, FECHA, COL...). Es el mismo filtro por palabra completa que ya
+        # usa la Prioridad 3, en vez de una lista propia por rama.
+        if _PATRON_KEYWORDS_EXCLUIR.search(candidato_upper):
+            continue
+        if (es_similar_etiqueta(candidato_upper, "APELLIDOS", threshold=70)
+                or es_similar_etiqueta(candidato_upper, "NOMBRES", threshold=70)):
+            continue
+        if es_similar_a_labels_tarjeta(candidato_upper, threshold=70):
+            continue
+        if not _es_candidato_mayusculas_plantilla(candidato):
+            continue
+        return candidato_upper
+    return ""
+
+
+def _es_version_extendida(candidato, base):
+    """
+    True si 'candidato' es el MISMO texto que 'base' pero mas largo -- es decir, base
+    parece una version truncada de candidato. Se comparan solo las letras (sin espacios
+    ni signos) para que no importe como quedaron separadas las palabras.
+
+    Se usa para detectar nombres cortados por el ancho fijo del MRZ: si lo que se leyo
+    del campo impreso empieza igual que lo del MRZ pero continua, el MRZ venia recortado.
+    Al exigir que uno sea prefijo EXACTO del otro, dos nombres distintos nunca lo
+    activan -- solo el mismo nombre al que le falta el final.
+    """
+    solo_letras = lambda t: re.sub(r'[^A-ZÑ]', '', normalizar_texto(t or ""))
+    c, b = solo_letras(candidato), solo_letras(base)
+    return len(c) > len(b) > 0 and c.startswith(b)
+
+
+# Que tan parecidos tienen que ser el nombre impreso y el del MRZ para considerarlos el
+# MISMO nombre leido dos veces (y no dos nombres distintos). Medido sobre cedulas reales:
+# los desacuerdos que son el mismo nombre dan 90-99 -- "TOVAR CASTIELO"/"TOVAR CASTILLO"
+# da 95, "MUNOZ"/"MUÑOZ" da 96 -- mientras que una lectura posicional que se fue a
+# cualquier lado queda MUY por debajo.
+_UMBRAL_MISMO_NOMBRE = 90
+
+
+def _impreso_le_gana_al_mrz(impreso, mrz):
+    """
+    El MRZ es la fuente por defecto para el nombre, pero hay dos formas conocidas en que
+    pierde contra el campo impreso -- y en las dos se trata del MISMO nombre leido dos
+    veces, no de dos nombres distintos:
+
+    1. Viene TRUNCADO: los renglones del MRZ son de ancho fijo (30 caracteres) y cortan
+       los nombres largos ("...ANDREA<PATRICI" mientras el campo impreso dice "ANDREA
+       PATRICIA" completo).
+    2. Viene PEOR LEIDO o EMPOBRECIDO: el MRZ es la letra mas chica y densa de la cedula,
+       la que peor sobrevive a un escaneo o una fotocopia (caso real: "TOVAR<CASTIELO"
+       por "TOVAR CASTILLO"). Y ademas, por norma, el MRZ no lleva enies ni tildes
+       ("TORRES<MUNOZ" por "TORRES MUÑOZ"), asi que cuando ambos dicen lo mismo el
+       impreso siempre trae MAS informacion.
+
+    Para que esto no le de la victoria a una lectura posicional que agarro basura, se
+    exige que los dos textos sean casi el mismo y que el impreso NO tenga menos letras
+    que el MRZ: si al impreso le faltan, es el impreso el que perdio algo por el camino
+    y entonces se queda el MRZ.
+    """
+    if not impreso or not mrz:
+        return False
+    # Truncado: prefijo exacto, la senial mas fuerte y la que no necesita umbral.
+    if _es_version_extendida(impreso, mrz):
+        return True
+    solo_letras = lambda t: re.sub(r'[^A-ZÑ]', '', normalizar_texto(t or ""))
+    if len(solo_letras(impreso)) < len(solo_letras(mrz)):
+        return False
+    return fuzz.ratio(normalizar_texto(impreso), normalizar_texto(mrz)) >= _UMBRAL_MISMO_NOMBRE
+
+
+def extraer_documento(texto):
+    """
+    Extrae el numero de documento cruzando las DOS fuentes que trae la cedula, en vez de
+    confiar ciegamente en una sola:
+
+    - El frente lo imprime en letra grande y con puntos ("1.110.461.846").
+    - El reverso lo repite dentro de una linea densa de codigo
+      ("P.2900100.63141102-F-1110451046-20051212").
+
+    Antes se prefería SIEMPRE el del reverso, y cuando el OCR lo leia mal (facil: son
+    digitos chiquitos y corridos) el documento quedaba equivocado aunque el del frente
+    estuviera perfecto -- caso real: 1110451046 en vez de 1110461846, que generaba una
+    falsa alerta de anomalia contra el Excel.
+
+    Reglas, en orden:
+    1. El numero impreso CON PUNTOS gana si tiene largo de cedula (8-10 digitos). Ese
+       patron es muy especifico -- es literalmente el campo "NUMERO"/"NUIP" de la
+       cedula -- y va en letra grande, la mas facil de leer para el OCR.
+    2. Si no, el del reverso, siempre que tambien tenga largo de cedula.
+    3. Si ninguno es plausible, se devuelve lo que haya, priorizando lo impreso.
+
+    El chequeo de largo es lo que evita dos fallos vistos en cedulas reales:
+    - El OCR parte la linea del reverso en dos y el patron captura un pedazo suelto:
+      de "P-4400900-00796692 / 115946894-..." salia "4400900", que es el codigo de la
+      oficina y no la cedula. Con 7 digitos no pasa el filtro de plausibilidad.
+    - El OCR lee mal un par de digitos del reverso (1110451046 en vez de 1110461846) y
+      generaba una falsa alerta contra el Excel.
+    """
+    def _plausible(numero):
+        # Las cedulas y NUIP colombianos estan en ese rango de digitos; un numero mas
+        # corto o mas largo es otra cosa (codigo de oficina, consecutivo, sello).
+        return numero is not None and 8 <= len(numero) <= 10
+
+    doc_reverso = None
+    matches_barcode = list(PATRON_DOC_BARCODE.finditer(texto))
+    if matches_barcode:
+        crudo = matches_barcode[-1].group(1)
+        try:
+            doc_reverso = str(int(crudo))  # normaliza y quita ceros a la izquierda
+        except ValueError:
+            doc_reverso = crudo
+
+    def _limpiar(match):
+        if not match:
+            return None
+        candidato = match.group(0).replace('.', '')
+        # Una cedula/NUIP colombiana nunca empieza en cero. Si el candidato trae un cero
+        # a la izquierda, casi seguro es otra cosa (un sello, un codigo de registro) que
+        # por casualidad tiene forma de grupos de 3 digitos.
+        return None if candidato.startswith('0') else candidato
+
+    # Con puntos = el campo impreso, inconfundible. Sin puntos = mucho menos confiable
+    # (puede caer sobre cualquier numero largo de la pagina), asi que solo se usa al final.
+    doc_puntos = _limpiar(PATRON_DOC_FRENTE.search(texto))
+    doc_generico = _limpiar(PATRON_DOC_GENERICO.search(texto))
+
+    if _plausible(doc_puntos) and _plausible(doc_reverso):
+        if doc_puntos == doc_reverso:
+            return doc_puntos          # doble confirmacion
+        if fuzz and fuzz.ratio(doc_puntos, doc_reverso) >= 70:
+            # Se parecen: es el mismo numero con algun digito mal leido. Gana el
+            # impreso, que va en letra grande y es mucho mas facil de leer que la
+            # linea densa del reverso.
+            return doc_puntos
+        # Muy distintos: lo del frente no parece ser el documento sino otro numero de
+        # la pagina (un sello, un consecutivo) que por casualidad quedo con formato de
+        # grupos de 3 digitos. El del reverso tiene un formato inconfundible.
+        return doc_reverso
+
+    if _plausible(doc_puntos):
+        return doc_puntos
+    if _plausible(doc_reverso):
+        return doc_reverso
+    if _plausible(doc_generico):
+        return doc_generico
+
+    return doc_puntos or doc_reverso or doc_generico
+
+
+# Las otras fechas que trae una cedula y que NO son la de nacimiento. Sirven para
+# descartar candidatas cuando su etiqueta vecina habla de una de estas.
+_ETIQUETAS_OTRAS_FECHAS = ("EXPEDICION", "VENCIMIENTO", "EXPIRACION")
+
+
+def _clasificar_linea_de_fecha(linea_norm):
+    """
+    Dice si la linea es la etiqueta de la fecha de NACIMIENTO, la de OTRA fecha
+    (expedicion/vencimiento/expiracion), o ninguna. Retorna "nacimiento", "otra" o None.
+
+    No basta con umbrales independientes: "NACIMIENTO" y "VENCIMIENTO" comparten el
+    sufijo "CIMIENTO" y se parecen entre si un 86%, asi que la linea de nacimiento
+    tambien pasaba el umbral de vencimiento y las dos quedaban empatadas. Por eso se
+    compara cual de las dos se parece MAS y gana esa.
+
+    Ademas se descarta la etiqueta del LUGAR de nacimiento, que comparte la palabra pero
+    rotula otro campo: si la linea dice "lugar" y no dice "fecha", es el lugar. La forma
+    combinada "FECHA Y LUGAR DE NACIMIENTO" (que trae la Contraseña) si cuenta, porque
+    nombra ambos campos a la vez.
+    """
+    sim_nacimiento = similitud_etiqueta(linea_norm, "NACIMIENTO")
+    sim_otra = max(similitud_etiqueta(linea_norm, etq) for etq in _ETIQUETAS_OTRAS_FECHAS)
+
+    if sim_nacimiento >= 70 and sim_nacimiento > sim_otra:
+        es_solo_lugar = (es_similar_etiqueta(linea_norm, "LUGAR", 70)
+                         and not es_similar_etiqueta(linea_norm, "FECHA", 70))
+        return None if es_solo_lugar else "nacimiento"
+
+    if sim_otra >= 70:
+        return "otra"
+
+    return None
+
+
+def extraer_fecha_nacimiento(texto, lineas):
+    """
+    Extrae la fecha de nacimiento ("21-NOV-1967").
+
+    Primero se prueba el camino rapido: la etiqueta exacta seguida de la fecha
+    ("FECHA DE NACIMIENTO 21-NOV-1967").
+
+    Si eso falla, se invierte la busqueda: en vez de ubicar la etiqueta y mirar donde
+    cayo la fecha, se recorren las FECHAS y para cada una se mira su vecindario para
+    decidir a que campo pertenece. Ese cambio es el que aguanta lo que hace el OCR en la
+    practica, donde la etiqueta aparece de cualquier forma:
+      - pegada a la fecha en la misma linea ("FECHA.DE NACIMIENTO 08-JUL-1994"),
+      - despues de la fecha ("21-NOV-1967" / "FECHA DE NACIMIENTO"),
+      - antes ("Fecha de nacimiento" / "G.S." / "08 JUL 1989"),
+      - o partida y revuelta entre dos lineas ("NAOMIENTG 28-JUL-1999" / "FECHADE").
+
+    Para no confundirla con las OTRAS fechas de la cedula (expedicion, vencimiento), se
+    exige que la etiqueta de nacimiento este mas CERCA de la fecha que cualquiera de
+    esas otras, y se descartan las fechas que traen una ciudad pegada en la misma linea
+    ("09-DIC-1985 CARTAGO"), que es la forma tipica de la de expedicion.
+
+    Como ultimo recurso queda una fecha totalmente numerica (DD-MM-YYYY).
+    """
+    match_directo = PATRON_FECHA_NAC.search(texto)
+    if match_directo:
+        return match_directo.group(1)
+
+    lineas_norm = [normalizar_texto(l.strip()) for l in lineas]
+
+    for i, linea_norm in enumerate(lineas_norm):
+        # Fecha + ciudad en la misma linea es la de expedicion, no la de nacimiento.
+        if PATRON_FECHA_LUGAR_EXP.search(linea_norm):
+            continue
+        m = PATRON_FECHA_MES_SUELTA.search(linea_norm)
+        if not m:
+            continue
+
+        # Se mira la propia linea y hasta 2 a cada lado, anotando a que distancia queda
+        # la etiqueta de nacimiento MAS CERCANA y la de otra fecha mas cercana.
+        dist_nacimiento = dist_otra = None
+        for j in range(max(0, i - 2), min(len(lineas_norm), i + 3)):
+            distancia = abs(j - i)
+            clase = _clasificar_linea_de_fecha(lineas_norm[j])
+            if clase == "nacimiento" and (dist_nacimiento is None or distancia < dist_nacimiento):
+                dist_nacimiento = distancia
+            elif clase == "otra" and (dist_otra is None or distancia < dist_otra):
+                dist_otra = distancia
+
+        if dist_nacimiento is not None and (dist_otra is None or dist_nacimiento < dist_otra):
+            return m.group(1)
+
+    match_fecha = PATRON_FECHA.search(texto)
+    if match_fecha:
+        return match_fecha.group(0)
+
+    return None
+
 
 def extraer_lugar_nacimiento(lineas, nombre_completo=None):
     """
@@ -281,26 +630,46 @@ def extraer_lugar_nacimiento(lineas, nombre_completo=None):
     """
     nombre_norm = normalizar_texto(nombre_completo) if nombre_completo else ""
 
+    def _candidato_valido(bruto):
+        candidato = bruto.strip()
+        candidato_norm = normalizar_texto(candidato)
+        if len(candidato) < 2:
+            return None
+        if any(kw in candidato_norm for kw in ("FECHA", "NUMERO", "APELLIDOS", "NOMBRES", "NACIMIENTO", "ESTATURA", "SEXO")):
+            return None
+        # Un lugar tiene NOMBRE, no es un dato de otro campo vecino. Sin este minimo de
+        # letras se colaban valores de campos contiguos -- caso real: el grupo sanguineo
+        # "O+" (y su variante mal leida "+0") terminaba guardado como lugar de
+        # nacimiento por ser la linea justo anterior a la etiqueta.
+        if sum(c.isalpha() for c in candidato) < 3:
+            return None
+        # Un lugar tampoco es una FECHA. El filtro de "mayoria digitos" de abajo no
+        # alcanza cuando el mes viene escrito en letras: "08 MAYO 1987 O+" tiene mas
+        # letras que numeros y se colaba entero como lugar de nacimiento.
+        if PATRON_FECHA_MES_SUELTA.search(candidato_norm) or PATRON_FECHA.search(candidato_norm):
+            return None
+        digitos = sum(c.isdigit() for c in candidato)
+        if digitos > len(candidato) * 0.5:
+            return None
+        if nombre_norm and candidato_norm in nombre_norm:
+            return None
+        return candidato.upper()
+
     for i, linea in enumerate(lineas):
         linea_upper = linea.upper().strip()
         if not (es_similar_etiqueta(linea_upper, "LUGAR", 70) and es_similar_etiqueta(linea_upper, "NACIMIENTO", 70)):
             continue
-        candidatos = []
-        for idx_cand in (i - 2, i - 1):
-            if idx_cand < 0:
-                continue
-            candidato = lineas[idx_cand].strip()
-            candidato_norm = normalizar_texto(candidato)
-            if len(candidato) < 2:
-                continue
-            if any(kw in candidato_norm for kw in ("FECHA", "NUMERO", "APELLIDOS", "NOMBRES", "NACIMIENTO", "ESTATURA", "SEXO")):
-                continue
-            digitos = sum(c.isdigit() for c in candidato)
-            if digitos > len(candidato) * 0.5:
-                continue
-            if nombre_norm and candidato_norm in nombre_norm:
-                continue
-            candidatos.append(candidato.upper())
+
+        # Hay cedulas que imprimen el valor ANTES de su etiqueta ("MORELIA" /
+        # "(CAQUETA)" / "LUGAR DE NACIMIENTO") y otras que lo imprimen DESPUES
+        # ("Lugar de nacimiento" / "BOGOTA D.C. (CUNDINAMARCA)"), asi que se prueban
+        # las dos direcciones: primero hacia atras y, si ahi no hay nada usable,
+        # hacia adelante.
+        candidatos = [c for c in (_candidato_valido(lineas[j])
+                                  for j in (i - 2, i - 1) if j >= 0) if c]
+        if not candidatos:
+            candidatos = [c for c in (_candidato_valido(lineas[j])
+                                      for j in (i + 1, i + 2) if j < len(lineas)) if c]
         if candidatos:
             return " ".join(candidatos)
     return None
@@ -336,16 +705,27 @@ def extraer_estatura_sexo_rh(lineas):
     label_idxs = []
     for i, linea in enumerate(lineas):
         linea_upper = linea.upper().strip()
+        # "G.S." (Grupo Sanguineo) es como algunas cedulas rotulan el RH. Al quitarle
+        # los puntos quedan 2 letras, y es_similar_etiqueta ignora palabras de menos de
+        # 4 -- por eso se compara aparte contra las formas cortas conocidas. Sin esto la
+        # etiqueta no contaba y la ventana no llegaba hasta el valor "O+".
+        letras = re.sub(r'[^A-ZÑ]', '', normalizar_texto(linea_upper))
         if (es_similar_etiqueta(linea_upper, "ESTATURA", 70)
                 or es_similar_etiqueta(linea_upper, "SEXO", 70)
-                or "RH" in normalizar_texto(linea_upper)):
+                or "RH" in normalizar_texto(linea_upper)
+                or letras in ("GS", "GSRH", "RHGS")):
             label_idxs.append(i)
 
     if not label_idxs:
         return None, None, None
 
+    # La ventana se abre 6 lineas a cada lado porque, segun la cedula, los valores caen
+    # ARRIBA o ABAJO de sus etiquetas, y ademas van en bloques de tres
+    # (Nacionalidad/Estatura/Sexo -> COL/1.62/F): hacia adelante hacen falta tantas
+    # lineas como hacia atras. Con el margen de 3 que habia antes, el sexo quedaba
+    # justo por fuera y se perdia.
     inicio = max(0, min(label_idxs) - 6)
-    fin = min(len(lineas), max(label_idxs) + 3)
+    fin = min(len(lineas), max(label_idxs) + 6)
 
     estatura = grupo_sanguineo = sexo = None
     for linea in lineas[inicio:fin]:
@@ -357,7 +737,13 @@ def extraer_estatura_sexo_rh(lineas):
         if grupo_sanguineo is None:
             m = PATRON_RH.search(linea_norm)
             if m:
-                grupo_sanguineo = m.group(0)
+                grupo_sanguineo = _normalizar_rh(m.group(1), m.group(2))
+            else:
+                # El mismo dato con el signo adelante ("+0"). Se prueba DESPUES de la
+                # forma canonica para que esa siempre tenga prioridad.
+                m = PATRON_RH_INVERTIDO.search(linea_norm)
+                if m:
+                    grupo_sanguineo = _normalizar_rh(m.group(2), m.group(1))
         if sexo is None:
             m = PATRON_SEXO.match(linea_norm)
             if m:
@@ -435,39 +821,15 @@ def extraer_datos_texto(texto):
     """
     lineas = [linea.strip() for linea in texto.split('\n') if linea.strip()]
 
-    documento = None
-    fecha_nacimiento = None
-
     # Detectar la cara y el tipo de documento
     cara = detectar_cara_cedula(texto)
     tipo_documento = detectar_tipo_documento(texto)
 
     # 1. Documento
-    matches_barcode = list(PATRON_DOC_BARCODE.finditer(texto))
-    if matches_barcode:
-        try:
-            documento = str(int(matches_barcode[-1].group(1)))  # normaliza y quita ceros a la izquierda
-        except ValueError:
-            documento = matches_barcode[-1].group(1)
-    else:
-        match_generico = PATRON_DOC_GENERICO.search(texto)
-        if match_generico:
-            candidato = match_generico.group(0).replace('.', '')
-            # Una cedula/NUIP colombiana nunca empieza en cero. Si el candidato trae
-            # un cero a la izquierda, casi seguro es otra cosa (un sello, un codigo de
-            # registro) que por casualidad tiene forma de grupos de 3 digitos -- mejor
-            # dejar el documento sin detectar que asignarle un numero equivocado.
-            if not candidato.startswith('0'):
-                documento = candidato
+    documento = extraer_documento(texto)
 
     # 2. Fecha de nacimiento
-    match_fecha_nac = PATRON_FECHA_NAC.search(texto)
-    if match_fecha_nac:
-        fecha_nacimiento = match_fecha_nac.group(1)
-    else:
-        match_fecha = PATRON_FECHA.search(texto)
-        if match_fecha:
-            fecha_nacimiento = match_fecha.group(0)
+    fecha_nacimiento = extraer_fecha_nacimiento(texto, lineas)
 
     # 3. Nombre — Sistema de 3 prioridades
     nombre_completo = ""
@@ -478,7 +840,9 @@ def extraer_datos_texto(texto):
         nombre_completo = nombre_mrz.upper()
 
     # PRIORIDAD 2: Contexto posicional (como las apps de escáner)
-    if not nombre_completo:
+    # Se calcula SIEMPRE, incluso si el MRZ ya dio un nombre, porque sirve para detectar
+    # un MRZ truncado (ver mas abajo). Es barato: solo recorre las lineas ya cargadas.
+    if True:
         apellidos_encontrado = ""
         nombres_encontrado = ""
 
@@ -488,58 +852,56 @@ def extraer_datos_texto(texto):
             # Detectar etiqueta "Apellidos" (dinámico por similitud >= 70%)
             is_apellidos_label = es_similar_etiqueta(linea_upper, "APELLIDOS", threshold=70)
             if is_apellidos_label:
-                # Buscar candidato a apellido: primero intentamos las líneas anteriores y luego las siguientes
-                candidatos_indices = []
-                if i - 1 >= 0: candidatos_indices.append(i - 1)
-                if i - 2 >= 0: candidatos_indices.append(i - 2)
-                if i + 1 < len(lineas): candidatos_indices.append(i + 1)
-                if i + 2 < len(lineas): candidatos_indices.append(i + 2)
-
-                for idx_cand in candidatos_indices:
-                    candidato = re.sub(r'[^A-Za-zÁÉÍÓÚñÑ ]', '', lineas[idx_cand]).strip()
-                    candidato_upper = normalizar_texto(candidato)
-                    # Evitar asociar etiquetas o palabras clave
-                    if len(candidato) > 2 and not any(kw in candidato_upper for kw in ["NOMBRE", "NUIP", "NUMERO", "REPUBLICA", "FECHA"]):
-                        if not es_similar_etiqueta(candidato_upper, "APELLIDOS", threshold=70) and not es_similar_etiqueta(candidato_upper, "NOMBRES", threshold=70):
-                            if not es_similar_a_labels_tarjeta(candidato_upper, threshold=70):
-                                if _es_candidato_mayusculas_plantilla(candidato):
-                                    apellidos_encontrado = candidato_upper
-                                    break
+                apellidos_encontrado = _valor_junto_a_etiqueta(lineas, i) or apellidos_encontrado
 
             # Detectar etiqueta "Nombres" (dinámico por similitud >= 70%)
             is_nombres_label = es_similar_etiqueta(linea_upper, "NOMBRES", threshold=70)
             if is_nombres_label and not is_apellidos_label and "FECHA" not in linea_upper:
-                candidatos_indices = []
-                if i - 1 >= 0: candidatos_indices.append(i - 1)
-                if i - 2 >= 0: candidatos_indices.append(i - 2)
-                if i + 1 < len(lineas): candidatos_indices.append(i + 1)
-                if i + 2 < len(lineas): candidatos_indices.append(i + 2)
-
-                for idx_cand in candidatos_indices:
-                    candidato = re.sub(r'[^A-Za-zÁÉÍÓÚñÑ ]', '', lineas[idx_cand]).strip()
-                    candidato_upper = normalizar_texto(candidato)
-                    # Evitar asociar etiquetas o palabras clave
-                    if len(candidato) > 2 and not any(kw in candidato_upper for kw in ["NACIONALIDAD", "ESTATURA", "SEXO", "FECHA", "COL", "NACIMIENTO"]):
-                        if not es_similar_etiqueta(candidato_upper, "APELLIDOS", threshold=70) and not es_similar_etiqueta(candidato_upper, "NOMBRES", threshold=70):
-                            if not es_similar_a_labels_tarjeta(candidato_upper, threshold=70):
-                                if candidato_upper != apellidos_encontrado and _es_candidato_mayusculas_plantilla(candidato):
-                                    nombres_encontrado = candidato_upper
-                                    break
+                # El apellido ya asignado no puede volver a salir como nombre: la etiqueta
+                # "Nombres" tiene el bloque de apellidos justo encima y seria su primer
+                # candidato.
+                nombres_encontrado = _valor_junto_a_etiqueta(
+                    lineas, i, ya_tomado=apellidos_encontrado) or nombres_encontrado
 
         # Exigimos la presencia de AMBOS campos para dar por válida la Prioridad 2 (posicional).
         # Si falta alguno de los dos, es seguro que el OCR omitió una de las etiquetas;
         # en ese caso es mucho más robusto usar el fallback (Prioridad 3) para juntar ambas partes.
+        nombre_posicional = ""
         if apellidos_encontrado and nombres_encontrado:
-            nombre_completo = f"{apellidos_encontrado} {nombres_encontrado}".strip()
+            nombre_posicional = f"{apellidos_encontrado} {nombres_encontrado}".strip()
+
+        if not nombre_completo:
+            nombre_completo = nombre_posicional
+        elif _impreso_le_gana_al_mrz(nombre_posicional, nombre_completo):
+            # El MRZ gana casi siempre, pero cuando el campo impreso dice EL MISMO nombre
+            # y lo dice mejor (completo, o con la enie y las tildes que el MRZ no lleva),
+            # gana el impreso. Ver _impreso_le_gana_al_mrz.
+            nombre_completo = nombre_posicional
 
     # PRIORIDAD 3: Heurística por eliminación (último recurso)
     if not nombre_completo:
         posibles_nombres = []
+        # Indices de las lineas pegadas a una etiqueta de Apellidos/Nombres. Cuando el
+        # OCR destroza UNA de las dos etiquetas, la Prioridad 2 se cae entera aunque la
+        # otra si se haya leido -- pero esa que sobrevivio sigue marcando donde estan el
+        # apellido y el nombre (uno arriba y otro abajo). Dandoles preferencia se evita
+        # quedarse con basura que aparezca antes en la pagina: en un caso real el nombre
+        # salia "DUMLRO AYALA CASTRO" ("DUMLRO" era un "NUMERO" mal leido) y se perdia
+        # el "JOSE WALTER" que estaba justo debajo de la etiqueta de apellidos.
+        vecinas_a_etiqueta = set()
+        for i, linea in enumerate(lineas):
+            linea_upper = linea.upper().strip()
+            if (es_similar_etiqueta(linea_upper, "APELLIDOS", threshold=70)
+                    or es_similar_etiqueta(linea_upper, "NOMBRES", threshold=70)):
+                for vecino in (i - 1, i + 1):
+                    if 0 <= vecino < len(lineas):
+                        vecinas_a_etiqueta.add(vecino)
+
         for idx, linea in enumerate(lineas):
             linea_upper = linea.upper()
             if "DETECTADO" in linea_upper or linea.startswith("---") or "<<" in linea:
                 continue
-            if any(keyword in linea_upper for keyword in KEYWORDS_EXCLUIR):
+            if _PATRON_KEYWORDS_EXCLUIR.search(linea_upper):
                 continue
             # Filtrar dinámicamente cualquier etiqueta o palabra clave de la plantilla de la cédula
             if es_similar_a_labels_tarjeta(linea_upper, threshold=70):
@@ -571,13 +933,25 @@ def extraer_datos_texto(texto):
             linea_limpia = re.sub(r'[^A-Za-zÁÉÍÓÚñÑ ]', '', linea).strip().upper()
             linea_limpia = re.sub(r'\s+', ' ', linea_limpia).strip()
             if len(linea_limpia) > 4 and linea_limpia not in ("DE", "EL", "LA", "LOS", "DEL", "GM", "COL", "GS"):
-                posibles_nombres.append(linea_limpia)
-        nombre_completo = " ".join(posibles_nombres[:2]).strip() if posibles_nombres else ""
+                posibles_nombres.append((idx, linea_limpia))
+
+        # Si alguna etiqueta de Apellidos/Nombres sobrevivio al OCR, se usan solo sus
+        # vecinas; si ninguna quedo legible, se cae al comportamiento de siempre (las
+        # dos primeras candidatas de la pagina).
+        junto_a_etiqueta = [t for i, t in posibles_nombres if i in vecinas_a_etiqueta]
+        elegidas = junto_a_etiqueta if len(junto_a_etiqueta) >= 2 else [t for _, t in posibles_nombres]
+        nombre_completo = " ".join(elegidas[:2]).strip() if elegidas else ""
 
     # 4. Campos adicionales (lugar de nacimiento, expedición, estatura/RH/sexo, edad calculada)
     lugar_nacimiento = extraer_lugar_nacimiento(lineas, nombre_completo)
     fecha_lugar_expedicion = extraer_fecha_lugar_expedicion(lineas)
     estatura, grupo_sanguineo, sexo = extraer_estatura_sexo_rh(lineas)
+    if not sexo:
+        # El campo impreso no quedo legible, pero la zona MRZ del reverso trae el sexo
+        # en una posicion fija y es mucho mas resistente al ruido del OCR.
+        match_mrz_sexo = PATRON_MRZ_SEXO.search(texto)
+        if match_mrz_sexo:
+            sexo = match_mrz_sexo.group(1)
     edad = calcular_edad(fecha_nacimiento)
 
     return {

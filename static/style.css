@@ -258,6 +258,27 @@ body {
     max-width: 420px;
 }
 
+/* Modal de texto OCR crudo -- un poco mas ancho que el de Configuracion, el texto
+   de una cedula completa necesita mas espacio para leerse comodo. */
+#raw_text_modal {
+    max-width: 720px;
+}
+
+.raw-text-content {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: var(--text-primary);
+    background: rgba(var(--overlay-rgb), 0.04);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-md);
+    padding: 16px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
 .form-group {
     margin-bottom: 24px;
     display: flex;
@@ -630,6 +651,32 @@ tr:hover td {
     font-size: 0.85rem;
     color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
+}
+
+/* Tiempo restante estimado, al lado del cronometro del panel de progreso */
+.eta-restante {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Estimacion que se muestra bajo el boton de iniciar, antes de arrancar */
+.estimacion-tiempo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    margin-top: 14px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.estimacion-tiempo .icon {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
 }
 
 .elapsed-final {

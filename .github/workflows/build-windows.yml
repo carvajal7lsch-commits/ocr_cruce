@@ -1,0 +1,159 @@
+# Compila el .exe de Windows en un runner limpio de GitHub, en vez de en la maquina del
+# desarrollador. Dos motivos:
+#
+#  1. Reproducibilidad: el build sale siempre del codigo que esta en el repo, con las
+#     dependencias declaradas en requirements.txt y nada mas -- no de lo que quedo
+#     instalado en una maquina.
+#  2. Firma de codigo: SignPath Foundation (firma gratis para proyectos open source)
+#     EXIGE que el binario lo produzca un CI publico y verificable. Sin este workflow no
+#     se puede ni pedir. Ver el paso "Firmar con SignPath" mas abajo, que queda
+#     comentado hasta que aprueben el proyecto.
+#
+# Se dispara al publicar un tag "vX.Y.Z", o a mano desde la pestaña Actions.
+
+name: Compilar el .exe de Windows
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # solo para poder crear el release al correr sobre un tag
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Traer el codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          # La app necesita 3.9+ (pandas 2.x ya no soporta 3.8). Se fija la version en
+          # vez de heredar la del runner, para que un cambio de imagen no altere el build.
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Descargar poppler
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # El .exe lleva poppler adentro para que el usuario final no tenga que
+          # instalarlo (ver _resolver_poppler_path en server.py). Se toma el ULTIMO
+          # release de poppler-windows en vez de fijar una version: asi el build no se
+          # rompe solo el dia que esa version deje de estar publicada.
+          $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN" }
+          $rel = Invoke-RestMethod "https://api.github.com/repos/oschwartz10612/poppler-windows/releases/latest" -Headers $headers
+          $asset = $rel.assets | Where-Object { $_.name -like "Release-*.zip" } | Select-Object -First 1
+          if (-not $asset) { throw "No encontre el .zip de poppler en el ultimo release" }
+          Write-Host "Usando $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile poppler.zip
+          Expand-Archive poppler.zip -DestinationPath C:\poppler -Force
+          $bin = Get-ChildItem C:\poppler -Recurse -Directory -Filter bin | Where-Object { $_.FullName -like "*Library\bin" } | Select-Object -First 1
+          if (-not $bin) { throw "No encontre Library\bin dentro del zip de poppler" }
+          # El .spec lee esta variable para decidir que carpeta de poppler empaquetar.
+          "POPPLER_BIN_SOURCE=$($bin.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Precargar los modelos de OCR
+        shell: pwsh
+        run: |
+          # rapidocr NO trae los .onnx dentro del paquete: los descarga la primera vez
+          # que se instancia el motor, hacia site-packages/rapidocr/models/. El .spec los
+          # mete al build con collect_data_files("rapidocr"), asi que si no se descargan
+          # ANTES de compilar, el .exe sale sin modelos y la app fallaria (o exigiria
+          # internet) la primera vez que el usuario final audite algo.
+          python -c "import numpy as np; from rapidocr import RapidOCR; RapidOCR()(np.full((320,320,3),255,dtype=np.uint8))"
+          python -c "import os, rapidocr; d=os.path.join(os.path.dirname(rapidocr.__file__),'models'); fs=os.listdir(d) if os.path.isdir(d) else []; print('modelos:', fs); raise SystemExit(0 if any(f.endswith('.onnx') for f in fs) else 'No se descargo ningun modelo .onnx')"
+
+      - name: Compilar con PyInstaller
+        shell: pwsh
+        run: pyinstaller AuditoriaCedulas.spec
+
+      - name: Revisar que el build quedo completo
+        shell: pwsh
+        run: |
+          # Un .exe que compila pero sale sin poppler o sin modelos arranca igual y recien
+          # falla cuando el usuario intenta auditar. Mejor que reviente aca.
+          if (-not (Test-Path "dist\AuditoriaCedulas\AuditoriaCedulas.exe")) { throw "No se genero el .exe" }
+          $poppler = Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "pdftoppm.exe" | Select-Object -First 1
+          if (-not $poppler) { throw "El build salio SIN poppler" }
+          $modelos = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "*.onnx")
+          if ($modelos.Count -lt 1) { throw "El build salio SIN modelos de OCR" }
+          Write-Host "poppler encontrado en: $($poppler.FullName)"
+          Write-Host "modelos de OCR incluidos: $($modelos.Count)"
+
+      - name: Empaquetar el .zip y calcular su SHA-256
+        shell: pwsh
+        run: |
+          # El nombre tiene que coincidir con el link de descarga del README.
+          Compress-Archive -Path "dist\AuditoriaCedulas" -DestinationPath "AuditoriaCedulas-Windows.zip" -Force
+          $hash = (Get-FileHash "AuditoriaCedulas-Windows.zip" -Algorithm SHA256).Hash
+          # El hash se publica para que quien desconfie del binario pueda verificar que lo
+          # que descargo es exactamente lo que salio de este build.
+          "$hash  AuditoriaCedulas-Windows.zip" | Set-Content "AuditoriaCedulas-Windows.zip.sha256" -Encoding ascii
+          Write-Host "SHA-256: $hash"
+
+      - name: Publicar el resultado del build
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuditoriaCedulas-Windows
+          path: |
+            AuditoriaCedulas-Windows.zip
+            AuditoriaCedulas-Windows.zip.sha256
+
+      # ------------------------------------------------------------------------------
+      # Firma de codigo (SignPath Foundation) -- descomentar CUANDO aprueben el proyecto.
+      #
+      # Es lo unico que quita el "Editor desconocido" de SmartScreen, y lo que mas baja
+      # los falsos positivos de los antivirus. SignPath toma el artifact que se subio
+      # arriba, lo firma, y devuelve el mismo paquete firmado. Los identificadores de
+      # abajo los entrega SignPath al aprobar el proyecto; el token va en
+      # Settings > Secrets and variables > Actions, con el nombre SIGNPATH_API_TOKEN.
+      #
+      # OJO: al firmar, el binario CAMBIA -- hay que recalcular el SHA-256 despues de
+      # este paso y publicar ese, no el que se calculo mas arriba.
+      #
+      # - name: Firmar con SignPath
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: "<lo entrega SignPath>"
+      #     project-slug: "<lo entrega SignPath>"
+      #     signing-policy-slug: "release-signing"
+      #     github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: "firmado"
+      # ------------------------------------------------------------------------------
+
+      - name: Crear el release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $hash = (Get-Content "AuditoriaCedulas-Windows.zip.sha256").Split(" ")[0]
+          $lineas = @(
+            "Descarga: AuditoriaCedulas-Windows.zip",
+            "",
+            "SHA-256:",
+            $hash,
+            "",
+            "Para verificarlo en Windows antes de ejecutarlo:",
+            "    Get-FileHash AuditoriaCedulas-Windows.zip -Algorithm SHA256",
+            "",
+            "Compilado automaticamente por GitHub Actions desde el codigo de este repositorio."
+          )
+          $lineas -join [Environment]::NewLine | Set-Content notas-release.md -Encoding utf8
+          gh release create $env:GITHUB_REF_NAME "AuditoriaCedulas-Windows.zip" "AuditoriaCedulas-Windows.zip.sha256" --title $env:GITHUB_REF_NAME --notes-file notas-release.md

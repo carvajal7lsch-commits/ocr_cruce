@@ -9,6 +9,9 @@ data/
 # Documentos e imágenes generados en tiempo de ejecución (contienen datos personales
 # de las cédulas procesadas -- NUNCA deben subirse al repositorio)
 static/uploads/
+# Imágenes anotadas del caché de OCR: mismo caso que uploads/ -- son fotos de cédulas
+# reales, con nombres y números visibles. Se regeneran solas al volver a auditar.
+static/ocr_cache/
 
 # Empaquetado del ejecutable
 build/
@@ -23,5 +26,10 @@ poppler_path.txt
 venv/
 env/
 
-# Editor
+# Logs del servidor en desarrollo
+*.log
+*.log.err
+
+# Editor / herramientas locales
 .vscode/
+.claude/
