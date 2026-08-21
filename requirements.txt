@@ -32,7 +32,22 @@ onnxruntime==1.19.2
 pymupdf==1.24.11
 
 # --- Transitivas que conviene fijar ---
-# No las importa la app directamente, pero definen la compatibilidad binaria del resto:
-# numpy 2.x rompe con librerias compiladas contra 1.x (opencv, onnxruntime).
+# No las importa la app directamente, pero definen la compatibilidad del resto.
+#
+# ESTE BLOQUE ATA EL PROYECTO A PYTHON 3.8. Motivo, y conviene tenerlo claro antes de
+# "modernizar" nada:
+#
+#   opencv (headless y normal, 5.x) trae esta regla en su metadata:
+#       numpy<2.0  si python_version <  3.9
+#       numpy>=2   si python_version >= 3.9
+#
+#   Y rapidocr depende de opencv, asi que no hay forma de esquivarla. En Python 3.9 o
+#   mas nuevo, pip se ve OBLIGADO a instalar numpy 2 -- que no es compatible con este
+#   pandas 2.0.3. Instalar en 3.9+ con estos pines no da un error raro al ejecutar:
+#   pip directamente aborta por conflicto.
+#
+# Migrar a numpy 2 es posible, pero arrastra pandas (>=2.2.2) y hay que RE-VALIDAR la
+# extraccion contra las paginas de prueba antes de publicar: numpy 2 cambio como se
+# convierten tipos, y esta app compara textos y numeros venidos de Excel y de OCR.
 numpy==1.24.4
 pillow==10.4.0
