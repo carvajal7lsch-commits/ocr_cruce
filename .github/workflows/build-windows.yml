@@ -32,8 +32,10 @@ jobs:
       - name: Preparar Python
         uses: actions/setup-python@v5
         with:
-          # La app necesita 3.9+ (pandas 2.x ya no soporta 3.8). Se fija la version en
-          # vez de heredar la del runner, para que un cambio de imagen no altere el build.
+          # En desarrollo esto corre sobre 3.8, pero 3.8 ya no recibe soporte, asi que
+          # lo que se DISTRIBUYE se compila sobre una version vigente. Se fija aca en
+          # vez de heredar la del runner, para que un cambio de imagen no altere el
+          # build sin avisar.
           python-version: "3.11"
           cache: pip
 
@@ -42,7 +44,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          # PyInstaller va CLAVADO a la version con la que se probo AuditoriaCedulas.spec:
+          # entre versiones mayores cambian las opciones del .spec (en la 6 se quito el
+          # cifrado del PYZ, por ejemplo), y un build que se rompe solo porque salio una
+          # version nueva es justo lo que este workflow tiene que evitar.
+          pip install pyinstaller==6.22.2
 
       - name: Descargar poppler
         shell: pwsh
