@@ -9,7 +9,7 @@
 # distribuye (comprimida en un .zip); AuditoriaCedulas.exe es lo que el usuario abre.
 
 import os
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 block_cipher = None
 
@@ -31,12 +31,35 @@ if os.path.exists(POPPLER_BIN_SOURCE):
 # internet la primera vez que corre la app.
 datas += collect_data_files("rapidocr")
 
+# PyInstaller arma el paquete siguiendo los "import" que encuentra LEYENDO el codigo, y
+# hay dos que no puede ver:
+#
+#   - onnxruntime: rapidocr elige su motor de inferencia en tiempo de ejecucion, asi que
+#     en el codigo no aparece ningun "import onnxruntime" que seguir. Resultado: el .exe
+#     salia con los tres modelos .onnx adentro pero SIN el motor que los ejecuta, y todas
+#     las paginas fallaban con "OCR no configurado correctamente".
+#   - pymupdf: se importa como "fitz" dentro de un try/except, y aparte trae DLLs propias
+#     que hay que arrastrar aparte.
+#
+# collect_all trae las tres cosas de cada paquete: datos, binarios y submodulos. Es mas
+# pesado que listarlos a mano, pero no depende de adivinar cual submodulo hace falta.
+binaries = []
+hiddenimports = []
+for paquete in ("onnxruntime", "pymupdf", "rapidocr"):
+    pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(paquete)
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hiddenimports
+
 a = Analysis(
     ["server.py"],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=[
+    hiddenimports=hiddenimports + [
+        # src/ocr.py y server.py hacen "import fitz", que es el nombre historico del
+        # modulo de PyMuPDF -- se declara explicito porque va dentro de un try/except.
+        "fitz",
         "uvicorn.logging",
         "uvicorn.loops",
         "uvicorn.loops.auto",

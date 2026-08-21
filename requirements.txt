@@ -1,11 +1,38 @@
-pandas>=2.0.0
-openpyxl>=3.1.0
-xlrd>=2.0.1
-pdf2image>=1.17.0
-rapidfuzz>=3.6.0
-opencv-python-headless>=4.8.0.0
-pymupdf>=1.22.0
-fastapi>=0.100.0
-uvicorn>=0.20.0
-python-multipart>=0.0.6
-rapidocr>=3.9.0
+# Versiones CLAVADAS a proposito, no rangos con ">=".
+#
+# Esto empaqueta un .exe que se distribuye: lo que importa es que el binario salga
+# siempre igual, no que traiga lo mas nuevo. Con rangos abiertos, un build limpio (el
+# de GitHub Actions) resolvia a versiones distintas de las probadas en desarrollo y
+# generaba un .exe roto que igual pasaba el CI en verde.
+#
+# Para subir alguna version: cambiarla aca, correr el workflow, y PROBAR el .exe
+# resultante antes de publicarlo.
+
+pandas==2.0.3
+openpyxl==3.1.5
+xlrd==2.0.2
+pdf2image==1.17.0
+rapidfuzz==3.9.7
+opencv-python-headless==5.0.0.93
+fastapi==0.124.4
+uvicorn==0.33.0
+python-multipart==0.0.20
+
+# --- OCR ---
+rapidocr==3.9.2
+# onnxruntime es el motor que EJECUTA los modelos .onnx, pero rapidocr NO lo declara
+# como dependencia suya (soporta varios backends y los deja opcionales). Sin esta linea,
+# un entorno limpio instala rapidocr sin con que correrlo: el import falla, la app
+# arranca igual y TODAS las paginas fallan con "OCR no configurado correctamente".
+onnxruntime==1.19.2
+
+# PyMuPDF: se usa para leer la capa de texto de los PDFs digitales (src/ocr.py lo
+# importa como "fitz"). Queda clavado porque las versiones nuevas cambiaron ese nombre
+# de modulo, y con "fitz" ausente el atajo del texto embebido se pierde en silencio.
+pymupdf==1.24.11
+
+# --- Transitivas que conviene fijar ---
+# No las importa la app directamente, pero definen la compatibilidad binaria del resto:
+# numpy 2.x rompe con librerias compiladas contra 1.x (opencv, onnxruntime).
+numpy==1.24.4
+pillow==10.4.0

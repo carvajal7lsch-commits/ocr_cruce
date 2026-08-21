@@ -52,19 +52,33 @@ OCR_ENGINE_PARAMS_OLD_PKG = dict(
 # silenciosamente en varios documentos. Por eso "rapidocr" es ahora el motor
 # primario; "rapidocr_onnxruntime" queda solo como fallback si no esta instalado.
 _using_new_rapidocr_pkg = False
+# Por que fallo la carga del motor, cuando falla. Sin esto el ImportError se perdia en
+# silencio: la app arrancaba igual y el usuario recibia el mismo error cripto en CADA
+# pagina ("OCR no configurado correctamente") sin ninguna pista de la causa real. Paso
+# de verdad con un .exe empaquetado sin onnxruntime adentro.
+ocr_error_carga = None
+
 try:
     from rapidocr import RapidOCR
     rapidocr_engine = RapidOCR(params=OCR_ENGINE_PARAMS_NEW_PKG)
     rapidocr_available = True
     _using_new_rapidocr_pkg = True
-except ImportError:
+except Exception as err_nuevo:
+    # Se captura Exception y no solo ImportError: al motor tambien lo puede tumbar un
+    # modelo que no esta, un backend de inferencia ausente o un YAML de configuracion
+    # que no se empaqueto -- y todos esos terminaban en el mismo silencio.
     try:
         from rapidocr_onnxruntime import RapidOCR
         rapidocr_engine = RapidOCR(**OCR_ENGINE_PARAMS_OLD_PKG)
         rapidocr_available = True
-    except ImportError:
+    except Exception as err_viejo:
         rapidocr_available = False
         rapidocr_engine = None
+        ocr_error_carga = (
+            f"rapidocr: {type(err_nuevo).__name__}: {err_nuevo} | "
+            f"rapidocr_onnxruntime: {type(err_viejo).__name__}: {err_viejo}"
+        )
+        print(f"[ERROR] No se pudo iniciar el motor de OCR -> {ocr_error_carga}")
 
 
 def _ejecutar_rapidocr(img_array):
@@ -185,4 +199,13 @@ def extraer_texto_con_enrutamiento(pdf_bytes, page_num, pdf_dpi=150, poppler_pat
         except Exception as e:
             raise Exception(f"Fallo en la conversión/OCR de la página {page_num}: {e}")
             
-    raise Exception("No se pudo extraer texto. PyMuPDF no disponible y/o OCR de RapidOCR/pdf2image no configurados correctamente.")
+    # Se dice QUE falto y POR QUE, en vez del mensaje generico de antes: este error se
+    # repite una vez por pagina, asi que si no trae la causa, no trae nada.
+    faltantes = []
+    if not pdf2image_available:
+        faltantes.append("pdf2image (poppler)")
+    if not rapidocr_available or rapidocr_engine is None:
+        faltantes.append(f"motor de OCR ({ocr_error_carga or 'no disponible'})")
+    if not pymupdf_available:
+        faltantes.append("PyMuPDF")
+    raise Exception("No se pudo extraer texto. Falta: " + "; ".join(faltantes))

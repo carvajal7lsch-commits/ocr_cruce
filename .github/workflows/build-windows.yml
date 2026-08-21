@@ -71,6 +71,10 @@ jobs:
           # El .spec lee esta variable para decidir que carpeta de poppler empaquetar.
           "POPPLER_BIN_SOURCE=$($bin.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
+      # OJO: cada comando va en su PROPIO paso. En un paso de pwsh con varios comandos
+      # solo cuenta el codigo de salida del ULTIMO, y eso ya dejo pasar un build roto:
+      # la instanciacion del motor fallaba, pero como el comando siguiente terminaba
+      # bien, el paso quedaba verde y el .exe se publicaba sin OCR.
       - name: Precargar los modelos de OCR
         shell: pwsh
         run: |
@@ -80,7 +84,19 @@ jobs:
           # ANTES de compilar, el .exe sale sin modelos y la app fallaria (o exigiria
           # internet) la primera vez que el usuario final audite algo.
           python -c "import numpy as np; from rapidocr import RapidOCR; RapidOCR()(np.full((320,320,3),255,dtype=np.uint8))"
-          python -c "import os, rapidocr; d=os.path.join(os.path.dirname(rapidocr.__file__),'models'); fs=os.listdir(d) if os.path.isdir(d) else []; print('modelos:', fs); raise SystemExit(0 if any(f.endswith('.onnx') for f in fs) else 'No se descargo ningun modelo .onnx')"
+
+      - name: Revisar que los modelos quedaron descargados
+        shell: pwsh
+        run: |
+          python -c "import os, rapidocr; d=os.path.join(os.path.dirname(rapidocr.__file__),'models'); fs=[f for f in (os.listdir(d) if os.path.isdir(d) else []) if f.endswith('.onnx')]; print('modelos:', fs); raise SystemExit(0 if len(fs) >= 3 else f'Se esperaban 3 modelos (det, cls, rec) y hay {len(fs)}')"
+
+      - name: Revisar que el motor de OCR se puede ejecutar
+        shell: pwsh
+        run: |
+          # onnxruntime es lo que EJECUTA los modelos, y rapidocr no lo declara como
+          # dependencia suya. Si falta, esto revienta aca y no en la maquina del usuario.
+          python -c "import onnxruntime; print('onnxruntime', onnxruntime.__version__, onnxruntime.get_available_providers())"
+          python -c "import fitz; print('PyMuPDF (fitz) OK')"
 
       - name: Compilar con PyInstaller
         shell: pwsh
@@ -92,12 +108,25 @@ jobs:
           # Un .exe que compila pero sale sin poppler o sin modelos arranca igual y recien
           # falla cuando el usuario intenta auditar. Mejor que reviente aca.
           if (-not (Test-Path "dist\AuditoriaCedulas\AuditoriaCedulas.exe")) { throw "No se genero el .exe" }
+
           $poppler = Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "pdftoppm.exe" | Select-Object -First 1
-          if (-not $poppler) { throw "El build salio SIN poppler" }
+          if (-not $poppler) { throw "El build salio SIN poppler: no podria convertir el PDF a imagenes" }
+
           $modelos = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "*.onnx")
-          if ($modelos.Count -lt 1) { throw "El build salio SIN modelos de OCR" }
-          Write-Host "poppler encontrado en: $($poppler.FullName)"
-          Write-Host "modelos de OCR incluidos: $($modelos.Count)"
+          if ($modelos.Count -lt 3) { throw "Se esperaban 3 modelos de OCR (det, cls, rec) y hay $($modelos.Count)" }
+
+          # Los modelos sin su motor no sirven de nada: es exactamente el .exe que se
+          # publico roto una vez -- traia los tres .onnx y ni un archivo de onnxruntime.
+          $ort = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "onnxruntime*")
+          if ($ort.Count -lt 1) { throw "El build salio SIN onnxruntime: los modelos no se podrian ejecutar" }
+
+          $mupdf = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "*pymupdf*")
+          if ($mupdf.Count -lt 1) { throw "El build salio SIN PyMuPDF: se pierde la lectura de PDFs con texto digital" }
+
+          Write-Host "poppler:     $($poppler.FullName)"
+          Write-Host "modelos OCR: $($modelos.Count)"
+          Write-Host "onnxruntime: $($ort.Count) archivos"
+          Write-Host "PyMuPDF:     $($mupdf.Count) archivos"
 
       - name: Empaquetar el .zip y calcular su SHA-256
         shell: pwsh
