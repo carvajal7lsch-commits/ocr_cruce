@@ -1317,7 +1317,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (closeAppBtn) {
         fetch('/api/app-info')
             .then(r => r.json())
-            .then(info => { if (info.empaquetada) closeAppBtn.classList.remove('hidden'); })
+            .then(info => {
+                if (!info.empaquetada) return;
+                closeAppBtn.classList.remove('hidden');
+                iniciarLatido();
+            })
             .catch(() => {});
 
         closeAppBtn.addEventListener('click', async () => {
@@ -1329,6 +1333,30 @@ document.addEventListener('DOMContentLoaded', () => {
                 // es que esta petición no alcance a responder.
             }
             document.getElementById('goodbye_overlay').classList.remove('hidden');
+        });
+    }
+
+    // Le avisa al servidor que la interfaz sigue abierta. Si dejan de llegar estos
+    // latidos, el servidor entiende que el usuario cerró la app y se apaga solo.
+    //
+    // Esto es lo que evita el proceso fantasma cuando la app quedó abierta en el
+    // navegador: ahí no hay ninguna ventana propia que el .exe pueda vigilar, y sin
+    // consola tampoco había forma de matarlo salvo el Administrador de tareas.
+    function iniciarLatido() {
+        const latir = () => { fetch('/api/heartbeat', { method: 'POST' }).catch(() => {}); };
+        latir();
+        // Cada 5 s. El servidor tolera hasta 90 s sin recibir nada, porque el navegador
+        // ralentiza los temporizadores de una pestaña en segundo plano (hasta 1 por
+        // minuto) y no queremos que minimizar la ventana apague la aplicación.
+        setInterval(latir, 5000);
+
+        // 'pagehide' es el único evento que el navegador garantiza al cerrar la pestaña,
+        // y sendBeacon lo único que alcanza a salir mientras la página se está muriendo
+        // (un fetch normal se cancela). Se manda a un endpoint aparte y no a /shutdown
+        // porque este evento TAMBIÉN se dispara al recargar con F5: el servidor espera
+        // unos segundos y, si llega un latido nuevo, cancela el apagado solo.
+        window.addEventListener('pagehide', () => {
+            try { navigator.sendBeacon('/api/despedida'); } catch (e) {}
         });
     }
 });

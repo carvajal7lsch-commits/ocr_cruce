@@ -168,6 +168,12 @@ jobs:
           $clr = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Include "clr*.pyd", "Python.Runtime.dll")
           if ($clr.Count -lt 1) { throw "El build salio SIN pythonnet: pywebview no podria crear la ventana en Windows" }
 
+          # El .dll solo NO alcanza: .NET necesita su deps.json al lado para encontrar el
+          # punto de entrada. Faltando ese archivo el build pasa, el .exe arranca, y la
+          # ventana falla en silencio cayendo al navegador. Ya paso una vez.
+          $deps = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "Python.Runtime.deps.json")
+          if ($deps.Count -lt 1) { throw "Falta Python.Runtime.deps.json: la ventana de la app no abriria" }
+
           Write-Host "poppler:     $($poppler.FullName)"
           Write-Host "modelos OCR: $($modelos.Count)"
           Write-Host "onnxruntime: $($ort.Count) archivos"

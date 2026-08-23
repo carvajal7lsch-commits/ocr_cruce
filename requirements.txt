@@ -38,6 +38,11 @@ pymupdf==1.24.11
 # app al cerrar la ventana: compilada sin consola, no habia ninguna forma visible de
 # hacerlo y el servidor quedaba corriendo en segundo plano.
 pywebview==6.2.1
+# Puente a .NET que usa pywebview en Windows. Entra como dependencia de pywebview, pero
+# se fija aca porque la 3.1.0 ya NO soporta Python 3.8 y pip elegiria una distinta segun
+# el interprete. Ojo: ademas del Python.Runtime.dll hay que empaquetar su
+# Python.Runtime.deps.json (ver el .spec) o la ventana no abre.
+pythonnet==3.0.5
 
 # --- Transitivas que conviene fijar ---
 # No las importa la app directamente, pero definen la compatibilidad del resto.

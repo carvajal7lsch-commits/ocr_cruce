@@ -43,9 +43,14 @@ datas += collect_data_files("rapidocr")
 #
 # collect_all trae las tres cosas de cada paquete: datos, binarios y submodulos. Es mas
 # pesado que listarlos a mano, pero no depende de adivinar cual submodulo hace falta.
+#   - pythonnet / clr_loader: pywebview los usa para hablar con WebView2. Aparte del
+#     Python.Runtime.dll necesitan su Python.Runtime.deps.json al lado; sin ese archivo
+#     .NET carga la DLL pero no encuentra el punto de entrada y la ventana no abre
+#     ("Failed to resolve Python.Runtime.Loader.Initialize"). Paso tal cual: el build
+#     traia el .dll solo, y la app caia al navegador en todos los arranques.
 binaries = []
 hiddenimports = []
-for paquete in ("onnxruntime", "pymupdf", "rapidocr"):
+for paquete in ("onnxruntime", "pymupdf", "rapidocr", "pythonnet", "clr_loader"):
     pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(paquete)
     datas += pkg_datas
     binaries += pkg_binaries

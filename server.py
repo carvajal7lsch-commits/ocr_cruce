@@ -1678,6 +1678,66 @@ async def get_history_detail(task_id: str):
         raise HTTPException(status_code=404, detail="Auditoría no encontrada en el historial")
     return detail
 
+# --------------------------------------------------------------------------------------
+# Vigilancia de la interfaz: apagar la app cuando el usuario cierra la ventana
+# --------------------------------------------------------------------------------------
+# Cuando la app termina abierta en el navegador (el ultimo recurso, si no se pudo abrir
+# ninguna ventana propia) no hay ningun proceso que vigilar: cerrar la pestaña deja el
+# servidor corriendo invisible, y sin consola no hay forma de matarlo salvo el
+# Administrador de tareas. Para eso la interfaz manda un "latido" cada pocos segundos y
+# el servidor se apaga solo cuando dejan de llegar.
+#
+# None = todavia nadie abrio la interfaz (el navegador puede tardar en arrancar).
+_ultimo_latido = {"t": None}
+
+
+@app.post("/api/heartbeat")
+async def heartbeat():
+    """La interfaz avisa que sigue abierta. Ver _vigilar_interfaz."""
+    _ultimo_latido["t"] = time.time()
+    return {"ok": True}
+
+
+@app.post("/api/despedida")
+async def despedida():
+    """
+    La interfaz avisa que se esta cerrando (se llama con sendBeacon, que es lo unico que
+    el navegador garantiza que sale mientras la pestaña muere).
+
+    No se apaga de una: este mismo evento se dispara al RECARGAR la pagina, y matar el
+    servidor porque alguien apreto F5 seria peor que el problema original. Lo que se hace
+    es envejecer el ultimo latido para que el vigilante actue en unos segundos -- si fue
+    una recarga, el latido nuevo llega antes y cancela el apagado solo.
+    """
+    _ultimo_latido["t"] = time.time() - _SEGUNDOS_SIN_LATIDO + _GRACIA_TRAS_DESPEDIDA
+    return {"ok": True}
+
+
+_SEGUNDOS_SIN_LATIDO = 90     # tolerante: el navegador ralentiza los timers de una
+                              # pestaña en segundo plano hasta 1 por minuto
+_GRACIA_TRAS_DESPEDIDA = 8    # margen para distinguir un cierre de una recarga
+_ESPERA_PRIMER_LATIDO = 180   # si nadie abre la interfaz, no tiene sentido seguir vivos
+
+
+def _vigilar_interfaz(intervalo=5):
+    """
+    Apaga el proceso cuando la interfaz deja de dar señales. Corre en un hilo aparte y
+    solo se activa en el .exe -- en desarrollo el servidor se apaga con Ctrl+C.
+    """
+    inicio = time.time()
+    while True:
+        time.sleep(intervalo)
+        ultimo = _ultimo_latido["t"]
+        if ultimo is None:
+            if time.time() - inicio > _ESPERA_PRIMER_LATIDO:
+                print("[INFO] Nadie abrio la interfaz; se apaga la aplicacion.")
+                os._exit(0)
+            continue
+        if time.time() - ultimo > _SEGUNDOS_SIN_LATIDO:
+            print("[INFO] La interfaz se cerro; se apaga la aplicacion.")
+            os._exit(0)
+
+
 @app.get("/api/app-info")
 async def app_info():
     """
@@ -1992,6 +2052,59 @@ def _abrir_navegador_cuando_este_listo(url, intentos=40, espera_seg=0.5):
     webbrowser.open(url)
 
 
+def _abrir_navegador_en_modo_app(url):
+    """
+    Segundo intento de "ventana", sin depender de nada instalado: abre Edge o Chrome con
+    --app=URL, que muestra la pagina en una ventana limpia -- sin barra de direcciones,
+    sin pestañas, sin marcadores. Para quien la usa se ve igual que un programa.
+
+    Bloquea hasta que se cierra esa ventana, y esa es la razon de ser de esta funcion:
+    permite apagar la app cuando el usuario la cierra. El plan C (abrir el navegador
+    normal) no puede hacerlo -- el navegador ya estaba abierto, no hay ningun proceso
+    propio que vigilar, y el servidor queda corriendo invisible.
+
+    Se le pasa un --user-data-dir propio a proposito: sin eso, si el navegador ya estaba
+    abierto, el ejecutable nuevo le delega la ventana al que ya corria y termina de
+    inmediato -- creeriamos que el usuario cerro la ventana cuando ni siquiera empezo.
+
+    Devuelve True si llego a abrir la ventana y ya se cerro; False si no encontro con que.
+    """
+    import subprocess
+    import tempfile
+
+    posibles = [
+        os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+                     "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                     "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+                     "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                     "Google", "Chrome", "Application", "chrome.exe"),
+    ]
+    navegador = next((ruta for ruta in posibles if os.path.isfile(ruta)), None)
+    if not navegador:
+        print("[INFO] No encontre Edge ni Chrome para abrir en modo aplicacion.")
+        return False
+
+    perfil = os.path.join(tempfile.gettempdir(), "AuditoriaCedulas-perfil")
+    try:
+        proceso = subprocess.Popen([
+            navegador,
+            f"--app={url}",
+            f"--user-data-dir={perfil}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ])
+    except Exception as err:
+        print(f"[ADVERTENCIA] No se pudo abrir en modo aplicacion ({type(err).__name__}: {err}).")
+        return False
+
+    print(f"[INFO] Ventana en modo aplicacion con {os.path.basename(navegador)}.")
+    proceso.wait()
+    return True
+
+
 def _abrir_ventana_de_app(url, titulo="Auditoría de Cédulas"):
     """
     Muestra la interfaz en una VENTANA propia (WebView2, el motor que ya viene con Edge
@@ -2055,10 +2168,20 @@ if __name__ == "__main__":
         # pronto, WebView2 pinta su pagina de "no se puede conectar" y ahi se queda.
         _esperar_a_que_el_servidor_responda(url)
 
-        if not _abrir_ventana_de_app(url):
-            # Plan B: el navegador de siempre. Aca hay que bloquear el hilo principal a
-            # mano -- sin ventana que esperar, el proceso terminaria de una y se
-            # llevaria el servidor puesto antes de que el navegador alcance a cargar.
+        # Tres intentos, de mejor a peor. Los dos primeros BLOQUEAN hasta que el usuario
+        # cierra la ventana, y al volver de ellos el proceso termina solo -- que es como
+        # se espera que se comporte un programa. El tercero no puede hacer eso.
+        if not _abrir_ventana_de_app(url) and not _abrir_navegador_en_modo_app(url):
+            # Plan C: el navegador de siempre, sin ventana propia que vigilar. Hay que
+            # bloquear el hilo principal a mano, porque si no el proceso terminaria de
+            # una y se llevaria el servidor puesto antes de que el navegador cargue.
+            # Aca el usuario TIENE que usar el boton "Salir" de la interfaz: cerrar la
+            # pestaña no apaga nada.
+            print("[ADVERTENCIA] Sin ventana propia: la app queda en el navegador. Se "
+                  "apagara sola al cerrar la pestaña, o con el boton 'Salir'.")
+            # Sin ventana propia que vigilar, la unica forma de saber que el usuario
+            # cerro la app es que la interfaz deje de dar señales de vida.
+            threading.Thread(target=_vigilar_interfaz, daemon=True).start()
             webbrowser.open(url)
             while True:
                 time.sleep(3600)
