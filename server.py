@@ -2052,6 +2052,37 @@ def _abrir_navegador_cuando_este_listo(url, intentos=40, espera_seg=0.5):
     webbrowser.open(url)
 
 
+def _quitar_marca_de_descarga(carpeta):
+    """
+    Le quita a los archivos de 'carpeta' la marca de "viene de internet" que Windows les
+    pone al extraerlos de un .zip descargado (el flujo NTFS "Zone.Identifier").
+
+    Hace falta por un motivo muy puntual: .NET se NIEGA a cargar ensamblados marcados
+    como de zona Internet, y para abrir la ventana propia hay que cargar
+    Python.Runtime.dll. Con la marca puesta la ventana nunca abre y la app termina en el
+    navegador -- y le pasa a CUALQUIERA que descargue el .zip, no es un caso raro.
+
+    La alternativa era pedirle a cada usuario que hiciera clic derecho sobre el .zip ->
+    Propiedades -> Desbloquear ANTES de descomprimir. Se prefiere resolverlo aca: es un
+    paso que nadie hace, y si no se hace no hay ningun mensaje que explique por que la
+    app se ve distinta.
+
+    Se limita a la carpeta de pythonnet a proposito, que es la unica que .NET revisa: no
+    hay razon para andar tocando los ~1400 archivos del paquete. Devuelve cuantas marcas
+    quito. Nunca lanza: si la carpeta es de solo lectura, simplemente no se puede y la
+    app sigue su camino (caera a la ventana del plan B, que no depende de .NET).
+    """
+    quitadas = 0
+    for raiz, _, archivos in os.walk(carpeta):
+        for nombre in archivos:
+            try:
+                os.remove(os.path.join(raiz, nombre) + ":Zone.Identifier")
+                quitadas += 1
+            except OSError:
+                pass   # no tenia marca, o no hay permiso de escritura
+    return quitadas
+
+
 def _abrir_navegador_en_modo_app(url):
     """
     Segundo intento de "ventana", sin depender de nada instalado: abre Edge o Chrome con
@@ -2121,6 +2152,15 @@ def _abrir_ventana_de_app(url, titulo="Auditoría de Cédulas"):
     que quien llama caiga al navegador. Nunca lanza: si esto falla, la app tiene que
     seguir siendo usable.
     """
+    # Sin esto, un .exe recien descargado NUNCA logra abrir la ventana: Windows marca
+    # sus archivos como "de internet" y .NET se niega a cargar el ensamblado que
+    # pywebview necesita. Ver _quitar_marca_de_descarga.
+    carpeta_pythonnet = os.path.join(BASE_DIR, "pythonnet")
+    if os.path.isdir(carpeta_pythonnet):
+        quitadas = _quitar_marca_de_descarga(carpeta_pythonnet)
+        if quitadas:
+            print(f"[INFO] Marca de descarga retirada de {quitadas} archivo(s) de pythonnet.")
+
     try:
         import webview
     except Exception as err:
