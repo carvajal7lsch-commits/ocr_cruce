@@ -2058,16 +2058,17 @@ def _abrir_navegador_en_modo_app(url):
     --app=URL, que muestra la pagina en una ventana limpia -- sin barra de direcciones,
     sin pestañas, sin marcadores. Para quien la usa se ve igual que un programa.
 
-    Bloquea hasta que se cierra esa ventana, y esa es la razon de ser de esta funcion:
-    permite apagar la app cuando el usuario la cierra. El plan C (abrir el navegador
-    normal) no puede hacerlo -- el navegador ya estaba abierto, no hay ningun proceso
-    propio que vigilar, y el servidor queda corriendo invisible.
+    NO espera a que la ventana se cierre, y esto es importante: el apagado lo decide el
+    latido de la interfaz (ver _vigilar_interfaz), no este proceso. Edge y Chrome suelen
+    delegar la ventana a una instancia que ya estaba corriendo y terminar de inmediato,
+    asi que esperar a que su proceso termine daba un falso "el usuario ya cerro": la app
+    se apagaba justo mientras la ventana todavia estaba cargando, y el usuario veia un
+    ERR_CONNECTION_REFUSED.
 
-    Se le pasa un --user-data-dir propio a proposito: sin eso, si el navegador ya estaba
-    abierto, el ejecutable nuevo le delega la ventana al que ya corria y termina de
-    inmediato -- creeriamos que el usuario cerro la ventana cuando ni siquiera empezo.
+    Se le pasa un --user-data-dir propio para que la ventana salga limpia y no herede la
+    sesion ni las pestañas del navegador personal de quien la usa.
 
-    Devuelve True si llego a abrir la ventana y ya se cerro; False si no encontro con que.
+    Devuelve True si logro lanzar la ventana; False si no encontro con que.
     """
     import subprocess
     import tempfile
@@ -2089,7 +2090,7 @@ def _abrir_navegador_en_modo_app(url):
 
     perfil = os.path.join(tempfile.gettempdir(), "AuditoriaCedulas-perfil")
     try:
-        proceso = subprocess.Popen([
+        subprocess.Popen([
             navegador,
             f"--app={url}",
             f"--user-data-dir={perfil}",
@@ -2101,7 +2102,6 @@ def _abrir_navegador_en_modo_app(url):
         return False
 
     print(f"[INFO] Ventana en modo aplicacion con {os.path.basename(navegador)}.")
-    proceso.wait()
     return True
 
 
@@ -2168,21 +2168,24 @@ if __name__ == "__main__":
         # pronto, WebView2 pinta su pagina de "no se puede conectar" y ahi se queda.
         _esperar_a_que_el_servidor_responda(url)
 
-        # Tres intentos, de mejor a peor. Los dos primeros BLOQUEAN hasta que el usuario
-        # cierra la ventana, y al volver de ellos el proceso termina solo -- que es como
-        # se espera que se comporte un programa. El tercero no puede hacer eso.
-        if not _abrir_ventana_de_app(url) and not _abrir_navegador_en_modo_app(url):
-            # Plan C: el navegador de siempre, sin ventana propia que vigilar. Hay que
-            # bloquear el hilo principal a mano, porque si no el proceso terminaria de
-            # una y se llevaria el servidor puesto antes de que el navegador cargue.
-            # Aca el usuario TIENE que usar el boton "Salir" de la interfaz: cerrar la
-            # pestaña no apaga nada.
-            print("[ADVERTENCIA] Sin ventana propia: la app queda en el navegador. Se "
-                  "apagara sola al cerrar la pestaña, o con el boton 'Salir'.")
-            # Sin ventana propia que vigilar, la unica forma de saber que el usuario
-            # cerro la app es que la interfaz deje de dar señales de vida.
+        # Plan A: ventana nativa. Bloquea hasta que el usuario la cierra, y al volver de
+        # ahi el proceso termina solo, que es como se espera que se comporte un programa.
+        if not _abrir_ventana_de_app(url):
+            # Sin ventana nativa, la interfaz vive en un navegador y el apagado lo decide
+            # el LATIDO que manda la interfaz, no el proceso del navegador: Edge y Chrome
+            # delegan la ventana a la instancia que ya estaba abierta y su proceso inicial
+            # termina enseguida, lo que se leia como "el usuario ya cerro" y mataba el
+            # servidor mientras la ventana todavia cargaba.
             threading.Thread(target=_vigilar_interfaz, daemon=True).start()
-            webbrowser.open(url)
+
+            # Plan B: ventana de Edge/Chrome en modo aplicacion (sin barra de direcciones
+            # ni pestañas). Plan C: el navegador de siempre.
+            if not _abrir_navegador_en_modo_app(url):
+                print("[INFO] La app queda en el navegador; se apagara al cerrar la pestaña.")
+                webbrowser.open(url)
+
+            # El hilo principal se queda esperando: el que decide cuando terminar es
+            # _vigilar_interfaz, que llama a os._exit cuando dejan de llegar latidos.
             while True:
                 time.sleep(3600)
     else:
