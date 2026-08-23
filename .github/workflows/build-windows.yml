@@ -15,7 +15,14 @@ name: Compilar el .exe de Windows
 
 on:
   push:
+    # Cada push a main compila. Se puede porque en repositorios PUBLICOS los minutos de
+    # Actions son gratis e ilimitados -- no hay nada que ahorrar. Y compilar siempre
+    # tiene su propio valor: avisa el mismo dia si un cambio rompio el empaquetado, en
+    # vez de descubrirlo semanas despues, al ir a publicar.
+    branches: ["main"]
+    # Un tag vX.Y.Z ademas publica el release (ver el ultimo paso).
     tags: ["v*"]
+  # Y siempre queda el boton "Run workflow" en la pestaña Actions para lanzarlo a mano.
   workflow_dispatch: {}
 
 permissions:
@@ -72,7 +79,10 @@ jobs:
           # pywebview es lo que abre la ventana de la app (y lo que permite apagarla al
           # cerrarla). Se importa aparte porque en Windows arrastra pythonnet, que es
           # justo el tipo de dependencia que se instala a medias sin avisar.
-          python -c "import webview, clr; print('pywebview', webview.__version__)"
+          # La version se pide con importlib.metadata y no con webview.__version__:
+          # pywebview no expone ese atributo, y preguntarlo hacia fallar el chequeo
+          # aunque la libreria estuviera perfectamente instalada.
+          python -c "import webview, clr, importlib.metadata as md; print('pywebview', md.version('pywebview'))"
           if ($LASTEXITCODE -ne 0) { throw "pywebview/pythonnet no quedaron instalados" }
 
       - name: Descargar poppler
