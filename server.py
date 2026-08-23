@@ -2052,29 +2052,36 @@ def _abrir_navegador_cuando_este_listo(url, intentos=40, espera_seg=0.5):
     webbrowser.open(url)
 
 
-def _quitar_marca_de_descarga(carpeta):
+def _quitar_marca_de_descarga(carpeta, extensiones=(".dll",)):
     """
     Le quita a los archivos de 'carpeta' la marca de "viene de internet" que Windows les
     pone al extraerlos de un .zip descargado (el flujo NTFS "Zone.Identifier").
 
     Hace falta por un motivo muy puntual: .NET se NIEGA a cargar ensamblados marcados
-    como de zona Internet, y para abrir la ventana propia hay que cargar
-    Python.Runtime.dll. Con la marca puesta la ventana nunca abre y la app termina en el
-    navegador -- y le pasa a CUALQUIERA que descargue el .zip, no es un caso raro.
+    como de zona Internet, y para abrir la ventana propia hay que cargar varios
+    (Python.Runtime.dll de pythonnet, y los de WebView2 que trae pywebview). Con la
+    marca puesta la ventana nunca abre y la app termina en el navegador -- y le pasa a
+    CUALQUIERA que descargue el .zip, no es un caso raro.
 
     La alternativa era pedirle a cada usuario que hiciera clic derecho sobre el .zip ->
     Propiedades -> Desbloquear ANTES de descomprimir. Se prefiere resolverlo aca: es un
     paso que nadie hace, y si no se hace no hay ningun mensaje que explique por que la
     app se ve distinta.
 
-    Se limita a la carpeta de pythonnet a proposito, que es la unica que .NET revisa: no
-    hay razon para andar tocando los ~1400 archivos del paquete. Devuelve cuantas marcas
-    quito. Nunca lanza: si la carpeta es de solo lectura, simplemente no se puede y la
-    app sigue su camino (caera a la ventana del plan B, que no depende de .NET).
+    Se filtra por extension y no se desmarca todo el paquete (~1400 archivos) porque los
+    ensamblados que .NET revisa son siempre .dll. Se recorre el paquete COMPLETO, eso si:
+    limitarlo a una carpeta ya fallo una vez -- se desbloqueo pythonnet, cargo su DLL, y
+    reboto contra los de webview/lib, que estaban igual de marcados.
+
+    Devuelve cuantas marcas quito. Nunca lanza: si la carpeta es de solo lectura,
+    simplemente no se puede y la app sigue su camino (caera a la ventana del plan B, que
+    no depende de .NET).
     """
     quitadas = 0
     for raiz, _, archivos in os.walk(carpeta):
         for nombre in archivos:
+            if not nombre.lower().endswith(extensiones):
+                continue
             try:
                 os.remove(os.path.join(raiz, nombre) + ":Zone.Identifier")
                 quitadas += 1
@@ -2153,13 +2160,11 @@ def _abrir_ventana_de_app(url, titulo="Auditoría de Cédulas"):
     seguir siendo usable.
     """
     # Sin esto, un .exe recien descargado NUNCA logra abrir la ventana: Windows marca
-    # sus archivos como "de internet" y .NET se niega a cargar el ensamblado que
+    # sus archivos como "de internet" y .NET se niega a cargar los ensamblados que
     # pywebview necesita. Ver _quitar_marca_de_descarga.
-    carpeta_pythonnet = os.path.join(BASE_DIR, "pythonnet")
-    if os.path.isdir(carpeta_pythonnet):
-        quitadas = _quitar_marca_de_descarga(carpeta_pythonnet)
-        if quitadas:
-            print(f"[INFO] Marca de descarga retirada de {quitadas} archivo(s) de pythonnet.")
+    quitadas = _quitar_marca_de_descarga(BASE_DIR)
+    if quitadas:
+        print(f"[INFO] Marca de descarga retirada de {quitadas} biblioteca(s).")
 
     try:
         import webview
