@@ -8,6 +8,53 @@ import hashlib
 import threading
 import webbrowser
 import datetime
+
+# --------------------------------------------------------------------------------------
+# Salida de diagnostico cuando el .exe corre SIN consola
+# --------------------------------------------------------------------------------------
+# El ejecutable se compila en modo ventana (console=False en el .spec) para que al
+# abrirlo no aparezca una consola negra al lado del navegador -- a un usuario no tecnico
+# eso le parece un error, o algo sospechoso.
+#
+# El costo de esconderla es que PyInstaller deja sys.stdout y sys.stderr en None: se
+# pierden los prints y los tracebacks, que es JUSTO lo que permite entender por que
+# fallo algo (dos veces ya: un .exe empaquetado sin el motor de OCR, y un pip que
+# instalo a medias). Asi que en vez de perderlos, se redirigen a un archivo.
+#
+# Va ANTES de importar src.* y las librerias pesadas a proposito: si algo revienta al
+# importarse (el caso tipico en un .exe mal empaquetado), el error tiene que quedar
+# escrito igual.
+def _redirigir_salida_a_archivo():
+    """
+    Manda stdout/stderr a un .log cuando no hay consola. Devuelve la ruta, o None si
+    habia consola (desarrollo) o si no se pudo crear el archivo -- que nunca debe
+    impedir que la app arranque: sin log se trabaja peor, sin app no se trabaja.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    if sys.stdout is not None and sys.stderr is not None:
+        return None
+    try:
+        # En %LOCALAPPDATA% y no junto al .exe: si alguien instala la app en una
+        # carpeta de solo lectura (Archivos de programa), ahi no se podria escribir.
+        carpeta = os.path.join(
+            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+            "AuditoriaCedulas",
+        )
+        os.makedirs(carpeta, exist_ok=True)
+        ruta = os.path.join(carpeta, "AuditoriaCedulas.log")
+        # buffering=1 (por linea): si la app se cierra de golpe, lo ya escrito queda.
+        archivo = open(ruta, "a", encoding="utf-8", buffering=1, errors="replace")
+        sys.stdout = archivo
+        sys.stderr = archivo
+        print(f"\n===== Inicio {datetime.datetime.now().isoformat(timespec='seconds')} =====")
+        return ruta
+    except Exception:
+        return None
+
+
+RUTA_LOG = _redirigir_salida_a_archivo()
+
 import pandas as pd
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Body
@@ -1631,6 +1678,42 @@ async def get_history_detail(task_id: str):
         raise HTTPException(status_code=404, detail="Auditoría no encontrada en el historial")
     return detail
 
+@app.get("/api/app-info")
+async def app_info():
+    """
+    Le dice al frontend si esta corriendo dentro del .exe. Se usa para mostrar el boton
+    de "Cerrar aplicacion" SOLO ahi: en desarrollo el server se apaga con Ctrl+C, y un
+    boton que mata el proceso mientras se programa es un accidente esperando ocurrir.
+    """
+    return {"empaquetada": bool(getattr(sys, "frozen", False))}
+
+
+@app.post("/api/shutdown")
+async def shutdown():
+    """
+    Apaga la aplicacion desde la interfaz.
+
+    Existe porque el .exe se compila sin consola: si la ventana propia no se pudo abrir
+    y la app quedo en el navegador, cerrar la pestaña NO apaga nada -- el servidor sigue
+    corriendo invisible y solo se puede matar desde el Administrador de tareas, algo que
+    no se le puede pedir a alguien sin conocimientos tecnicos.
+
+    Se sale con os._exit y no con un cierre ordenado de uvicorn a proposito: uvicorn
+    corre en un hilo secundario (el principal lo tiene la ventana) y no hay forma limpia
+    de pedirle desde aca que termine. No se pierde nada: el historial ya esta escrito en
+    SQLite y con commit desde que termino cada auditoria.
+    """
+    def _apagar():
+        # Un respiro para que esta respuesta HTTP alcance a llegar al navegador antes de
+        # que el proceso desaparezca; si no, el usuario ve un error de conexion en vez
+        # del mensaje de despedida.
+        time.sleep(0.5)
+        os._exit(0)
+
+    threading.Thread(target=_apagar, daemon=True).start()
+    return {"apagando": True}
+
+
 @app.delete("/api/history/{task_id}")
 async def delete_history_entry(task_id: str):
     # La clave del cache hay que leerla ANTES de borrar la fila: despues ya no queda de
@@ -1882,25 +1965,63 @@ def _encontrar_puerto_libre(preferido=8000, intentos=15):
     return preferido  # ninguno quedo libre; se intenta con el preferido de todas formas
 
 
-def _abrir_navegador_cuando_este_listo(url, intentos=40, espera_seg=0.5):
+def _esperar_a_que_el_servidor_responda(url, intentos=40, espera_seg=0.5):
     """
-    Espera a que el servidor responda antes de abrir el navegador -- para el .exe
-    empaquetado (pensado para alguien sin conocimientos tecnicos), asi la app se
-    siente como una aplicacion de escritorio normal: doble clic y se abre solo, en
-    vez de tener que copiar una URL a mano. Reintenta en vez de esperar un tiempo fijo
-    porque la primera vez que arranca puede tardar mas (descarga de modelos de OCR).
+    Bloquea hasta que el servidor conteste, o hasta agotar los intentos. Se reintenta
+    en vez de esperar un tiempo fijo porque el primer arranque puede tardar bastante
+    mas (inicializacion del motor de OCR). Devuelve True si llego a responder.
     """
     import urllib.request
     for _ in range(intentos):
         try:
             urllib.request.urlopen(url, timeout=1)
-            webbrowser.open(url)
-            return
+            return True
         except Exception:
             time.sleep(espera_seg)
-    # Si nunca respondio, igual se intenta abrir -- el usuario vera el error de
-    # conexion en el navegador en vez de que la app se quede sin hacer nada visible.
+    return False
+
+
+def _abrir_navegador_cuando_este_listo(url, intentos=40, espera_seg=0.5):
+    """
+    Abre la app en el navegador apenas el servidor conteste. Es el plan B: se usa si no
+    se pudo abrir la ventana propia (ver _abrir_ventana_de_app). Si el servidor nunca
+    respondio se abre igual, para que el usuario vea el error de conexion del navegador
+    en lugar de que la app se quede sin dar ninguna señal.
+    """
+    _esperar_a_que_el_servidor_responda(url, intentos, espera_seg)
     webbrowser.open(url)
+
+
+def _abrir_ventana_de_app(url, titulo="Auditoría de Cédulas"):
+    """
+    Muestra la interfaz en una VENTANA propia (WebView2, el motor que ya viene con Edge
+    en Windows) en lugar de en el navegador. Bloquea hasta que el usuario la cierra.
+
+    Dos razones para preferirla al navegador:
+      - Se ve y se usa como un programa normal: sin barra de direcciones, sin pestañas,
+        sin una URL con numero de puerto que no le dice nada a quien la usa.
+      - Cerrar la ventana termina el proceso. Con el navegador no hay forma visible de
+        apagar la app -- al compilar sin consola, el servidor quedaba corriendo en
+        segundo plano y solo se podia matar desde el Administrador de tareas.
+
+    Devuelve True si la ventana llego a abrirse y ya se cerro; False si no se pudo, para
+    que quien llama caiga al navegador. Nunca lanza: si esto falla, la app tiene que
+    seguir siendo usable.
+    """
+    try:
+        import webview
+    except Exception as err:
+        print(f"[INFO] Sin ventana propia ({type(err).__name__}: {err}); se usa el navegador.")
+        return False
+
+    try:
+        webview.create_window(titulo, url, width=1280, height=860, min_size=(900, 600))
+        webview.start()   # bloquea hasta que se cierra la ventana
+        return True
+    except Exception as err:
+        print(f"[ADVERTENCIA] No se pudo abrir la ventana ({type(err).__name__}: {err}); "
+              f"se usa el navegador.")
+        return False
 
 
 if __name__ == "__main__":
@@ -1920,8 +2041,27 @@ if __name__ == "__main__":
         # ocupado en la maquina del usuario nunca le rompe el doble-clic-y-listo.
         puerto = puerto_deseado if "PORT" in os.environ else _encontrar_puerto_libre(puerto_deseado)
         url = f"http://127.0.0.1:{puerto}"
-        threading.Thread(target=_abrir_navegador_cuando_este_listo, args=(url,), daemon=True).start()
-        uvicorn.run(app, host="127.0.0.1", port=puerto, reload=False)
+
+        # El servidor va en un hilo aparte porque la ventana TIENE que vivir en el hilo
+        # principal (es un requisito de la interfaz grafica de Windows). El hilo es
+        # daemon a proposito: al cerrarse la ventana, el proceso termina y se lleva el
+        # servidor con el, que es justo lo que se espera al cerrar un programa.
+        threading.Thread(
+            target=lambda: uvicorn.run(app, host="127.0.0.1", port=puerto, reload=False),
+            daemon=True,
+        ).start()
+
+        # Se espera a que conteste antes de mostrar la ventana: si se abre demasiado
+        # pronto, WebView2 pinta su pagina de "no se puede conectar" y ahi se queda.
+        _esperar_a_que_el_servidor_responda(url)
+
+        if not _abrir_ventana_de_app(url):
+            # Plan B: el navegador de siempre. Aca hay que bloquear el hilo principal a
+            # mano -- sin ventana que esperar, el proceso terminaria de una y se
+            # llevaria el servidor puesto antes de que el navegador alcance a cargar.
+            webbrowser.open(url)
+            while True:
+                time.sleep(3600)
     else:
         puerto = puerto_deseado
         url = f"http://127.0.0.1:{puerto}"

@@ -31,6 +31,14 @@ onnxruntime==1.19.2
 # de modulo, y con "fitz" ausente el atajo del texto embebido se pierde en silencio.
 pymupdf==1.24.11
 
+# --- Ventana de la aplicacion ---
+# Muestra la interfaz en una ventana propia en vez de en el navegador. En Windows usa
+# WebView2 (el motor que ya trae Edge) a traves de pythonnet, que se instala solo como
+# dependencia suya. Ademas de verse como un programa normal, es lo que permite APAGAR la
+# app al cerrar la ventana: compilada sin consola, no habia ninguna forma visible de
+# hacerlo y el servidor quedaba corriendo en segundo plano.
+pywebview==6.2.1
+
 # --- Transitivas que conviene fijar ---
 # No las importa la app directamente, pero definen la compatibilidad del resto.
 #

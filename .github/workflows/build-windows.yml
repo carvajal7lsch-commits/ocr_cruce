@@ -69,6 +69,12 @@ jobs:
           python -c "import numpy, pandas, cv2, onnxruntime, fitz, rapidocr; print('numpy', numpy.__version__); print('pandas', pandas.__version__); print('cv2', cv2.__version__); print('onnxruntime', onnxruntime.__version__)"
           if ($LASTEXITCODE -ne 0) { throw "Falta alguna dependencia critica" }
 
+          # pywebview es lo que abre la ventana de la app (y lo que permite apagarla al
+          # cerrarla). Se importa aparte porque en Windows arrastra pythonnet, que es
+          # justo el tipo de dependencia que se instala a medias sin avisar.
+          python -c "import webview, clr; print('pywebview', webview.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw "pywebview/pythonnet no quedaron instalados" }
+
       - name: Descargar poppler
         shell: pwsh
         env:
@@ -143,6 +149,14 @@ jobs:
 
           $mupdf = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "*pymupdf*")
           if ($mupdf.Count -lt 1) { throw "El build salio SIN PyMuPDF: se pierde la lectura de PDFs con texto digital" }
+
+          # Sin esto el .exe arranca, cae al navegador y queda sin forma visible de
+          # cerrarse (no hay consola). Se revisa pywebview y el puente a .NET aparte:
+          # falta cualquiera de los dos y no hay ventana.
+          $webview = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "webview*")
+          if ($webview.Count -lt 1) { throw "El build salio SIN pywebview: no se abriria la ventana de la app" }
+          $clr = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Include "clr*.pyd", "Python.Runtime.dll")
+          if ($clr.Count -lt 1) { throw "El build salio SIN pythonnet: pywebview no podria crear la ventana en Windows" }
 
           Write-Host "poppler:     $($poppler.FullName)"
           Write-Host "modelos OCR: $($modelos.Count)"

@@ -1304,4 +1304,31 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById(targetTab).classList.add('active');
         });
     });
+
+    // --- Cerrar la aplicación -------------------------------------------------------
+    // El .exe se compila sin consola, así que no hay ninguna forma visible de apagarlo:
+    // si la app quedó abierta en el navegador (el plan B cuando no se pudo abrir la
+    // ventana propia), cerrar la pestaña deja el servidor corriendo invisible. Este
+    // botón es la única salida que no exige abrir el Administrador de tareas.
+    //
+    // Solo se muestra cuando corre empaquetada -- en desarrollo el server se apaga con
+    // Ctrl+C y un botón que mata el proceso sería un accidente esperando ocurrir.
+    const closeAppBtn = document.getElementById('close_app_btn');
+    if (closeAppBtn) {
+        fetch('/api/app-info')
+            .then(r => r.json())
+            .then(info => { if (info.empaquetada) closeAppBtn.classList.remove('hidden'); })
+            .catch(() => {});
+
+        closeAppBtn.addEventListener('click', async () => {
+            if (!confirm('¿Cerrar la aplicación? Se detendrá cualquier auditoría en curso.')) return;
+            try {
+                await fetch('/api/shutdown', { method: 'POST' });
+            } catch (err) {
+                // Se ignora a propósito: el servidor se está muriendo, así que lo normal
+                // es que esta petición no alcance a responder.
+            }
+            document.getElementById('goodbye_overlay').classList.remove('hidden');
+        });
+    }
 });

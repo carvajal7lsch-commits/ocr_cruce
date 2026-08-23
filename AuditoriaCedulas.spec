@@ -97,7 +97,10 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    # Modo ventana: sin consola negra al lado del navegador. La salida de diagnostico
+    # no se pierde -- server.py la manda a %LOCALAPPDATA%/AuditoriaCedulas/ cuando
+    # detecta que no hay consola (ver _redirigir_salida_a_archivo).
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

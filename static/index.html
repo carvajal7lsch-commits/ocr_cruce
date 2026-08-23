@@ -145,6 +145,10 @@
                 <circle cx="12" cy="12" r="4.2"/>
                 <path d="M12 2.5v2.4M12 19.1v2.4M21.5 12h-2.4M4.9 12H2.5M18.36 5.64l-1.7 1.7M7.34 16.66l-1.7 1.7M18.36 18.36l-1.7-1.7M7.34 7.34l-1.7-1.7"/>
             </symbol>
+            <symbol id="icon-power" viewBox="0 0 24 24">
+                <path d="M12 3v9"/>
+                <path d="M6.8 6.8a8 8 0 1 0 10.4 0"/>
+            </symbol>
             <symbol id="icon-moon" viewBox="0 0 24 24">
                 <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>
             </symbol>
@@ -166,9 +170,27 @@
                         <svg class="icon"><use href="#icon-settings"/></svg>
                         <span>Config</span>
                     </button>
+                    <!-- Solo aparece cuando la app corre como .exe: ahi no hay consola
+                         ni forma visible de apagarla. En desarrollo se usa Ctrl+C. -->
+                    <button type="button" class="btn-header-action hidden" id="close_app_btn" title="Cerrar la aplicación">
+                        <svg class="icon"><use href="#icon-power"/></svg>
+                        <span>Salir</span>
+                    </button>
                 </div>
             </div>
         </header>
+
+        <!-- Pantalla de despedida: se muestra despues de apagar la app, para que quede
+             claro que ya se cerro y que la ventana se puede cerrar sin miedo. -->
+        <div class="modal-overlay hidden" id="goodbye_overlay">
+            <div class="modal card" id="goodbye_modal">
+                <div class="modal-header">
+                    <h2><svg class="icon"><use href="#icon-check-circle"/></svg> Aplicación cerrada</h2>
+                </div>
+                <p>La auditoría se cerró correctamente. Tu historial quedó guardado.</p>
+                <p class="tip">Ya puedes cerrar esta ventana.</p>
+            </div>
+        </div>
 
         <!-- Config Modal -->
         <div class="modal-overlay hidden" id="config_modal_overlay">
