@@ -246,6 +246,19 @@
                             <div class="range-value"><span id="dpi_val">300</span> DPI</div>
                             <small class="tip">Texto pequeño (fecha de nacimiento, número de documento) se detecta mucho peor por debajo de 250 DPI.</small>
                         </div>
+
+                        <!-- Solo aparece si el equipo tiene GPU utilizable. No hay opcion
+                             "automatica" a proposito: medir cual conviene con una prueba
+                             corta dio resultados falsos (ver src/ocr.py), asi que la
+                             decision se toma comparando auditorias reales. -->
+                        <div class="form-group hidden" id="ocr_engine_group">
+                            <label for="ocr_provider"><svg class="icon"><use href="#icon-chip"/></svg> Motor de OCR</label>
+                            <select id="ocr_provider">
+                                <option value="cpu" selected>Procesador / CPU (recomendado)</option>
+                                <option value="dml">Tarjeta gráfica / GPU</option>
+                            </select>
+                            <small class="tip">En equipos con gráficos integrados la GPU suele ser <strong>mucho más lenta</strong> (medido: 15.8 vs 2.9 seg/página). Con una tarjeta dedicada puede convenir: cambia el motor, audita el mismo PDF y compara los tiempos del historial.</small>
+                        </div>
                     </div>
                 </details>
             </div>

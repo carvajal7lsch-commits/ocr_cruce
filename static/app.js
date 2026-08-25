@@ -1345,53 +1345,66 @@ document.addEventListener('DOMContentLoaded', () => {
     function mostrarMotorOCR(ocr) {
         const badge = document.getElementById('ocr_engine_badge');
         const label = document.getElementById('ocr_engine_label');
-        const detalleEl = document.getElementById('ocr_engine_detalle');
         if (!badge || !label || !ocr) return;
 
         const enGpu = ocr.proveedor === 'dml';
         label.textContent = enGpu ? 'GPU' : 'CPU';
         badge.classList.toggle('gpu', enGpu);
 
-        // El detalle se arma como HTML y se abre con un clic. El tooltip nativo que había
-        // antes exigía dejar el mouse quieto un segundo sobre el indicador, y en la
-        // práctica no se veía: el cursor de ayuda prometía información que no llegaba.
-        const bloques = [];
-        bloques.push(`<p><strong>${enGpu
-            ? 'El OCR se está ejecutando en la GPU.'
-            : 'El OCR se está ejecutando en el procesador (CPU).'}</strong></p>`);
-
-        if (ocr.calibracion) {
-            const c = ocr.calibracion;
-            const masRapido = c.gpu < c.cpu ? 'gpu' : 'cpu';
-            bloques.push('<p>Esta aplicación midió las dos opciones en este mismo equipo, con páginas reales, y se quedó con la más rápida:</p>');
-            bloques.push(`
-                <table class="ocr-engine-tabla">
-                    <tr class="${masRapido === 'cpu' ? 'ganador' : ''}">
-                        <td>Procesador (CPU)</td><td>${c.cpu.toFixed(2)} s por página</td>
-                    </tr>
-                    <tr class="${masRapido === 'gpu' ? 'ganador' : ''}">
-                        <td>Tarjeta gráfica (GPU)</td><td>${c.gpu.toFixed(2)} s por página</td>
-                    </tr>
-                </table>`);
-            const dif = Math.abs(c.cpu - c.gpu) / Math.max(c.cpu, c.gpu) * 100;
-            bloques.push(`<p class="tip">La diferencia entre ambas es del ${dif.toFixed(0)}%.</p>`);
-        } else if (ocr.gpu_disponible) {
-            bloques.push('<p>Este equipo tiene una GPU que se puede usar, pero todavía no se ha medido cuál de las dos conviene.</p>');
-            bloques.push('<p class="tip">La medición se hace sola al terminar la primera auditoría, sin que tengas que esperar. El resultado se aplica desde la siguiente.</p>');
-        } else if (ocr.soporte_gpu === false) {
-            // Caso típico al correr desde el código fuente: el paquete instalado es el
-            // onnxruntime normal, que no habla con ninguna GPU. No decirlo así hacía
-            // pensar que la GPU del equipo no servía, cuando el que no la soporta es
-            // el paquete.
-            bloques.push('<p>Esta instalación no incluye soporte de GPU, así que el OCR usa el procesador.</p>');
-            bloques.push('<p class="tip">No dice nada sobre la tarjeta gráfica de este equipo: es el paquete de OCR instalado el que no la puede usar. La aplicación empaquetada (.exe) sí lo trae.</p>');
+        const detalle = [];
+        if (enGpu) {
+            detalle.push('El OCR se está ejecutando en la GPU.');
+            detalle.push('');
+            detalle.push('Modo manual (OCR_PROVEEDOR=dml). En equipos con gráficos');
+            detalle.push('integrados suele ser bastante más lento que el procesador.');
         } else {
-            bloques.push('<p>No se detectó una tarjeta gráfica utilizable para OCR, así que se trabaja con el procesador.</p>');
-            bloques.push('<p class="tip">Es lo normal en equipos sin GPU compatible. No es un error.</p>');
+            detalle.push('El OCR se está ejecutando en el procesador (CPU).');
+            detalle.push('');
+            if (ocr.gpu_disponible) {
+                // Se dice que hay GPU y que aun asi se usa la CPU, porque si no parece
+                // que la app no la detecto. La razon esta medida: ver src/ocr.py.
+                detalle.push('Este equipo tiene GPU, pero el procesador resultó');
+                detalle.push('más rápido para este trabajo, así que se usa ese.');
+            } else if (ocr.soporte_gpu === false) {
+                detalle.push('Esta instalación no incluye soporte de GPU.');
+                detalle.push('No dice nada sobre la tarjeta gráfica del equipo.');
+            } else {
+                detalle.push('No se detectó una tarjeta gráfica utilizable.');
+            }
         }
 
-        if (detalleEl) detalleEl.innerHTML = bloques.join('');
+        badge.title = detalle.join('\n');
         badge.classList.remove('hidden');
+
+        // El selector solo tiene sentido si hay GPU con que comparar.
+        const grupo = document.getElementById('ocr_engine_group');
+        const select = document.getElementById('ocr_provider');
+        if (grupo && select && ocr.gpu_disponible) {
+            select.value = ocr.proveedor;
+            grupo.classList.remove('hidden');
+            if (!select.dataset.listo) {
+                select.dataset.listo = '1';
+                select.addEventListener('change', async () => {
+                    const elegido = select.value;
+                    select.disabled = true;
+                    try {
+                        const r = await fetch('/api/ocr-provider', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ proveedor: elegido })
+                        });
+                        if (!r.ok) throw new Error(await extractErrorDetail(r, 'No se pudo cambiar el motor'));
+                        const info = await fetch('/api/app-info').then(x => x.json());
+                        mostrarMotorOCR(info.ocr);
+                    } catch (err) {
+                        alert(err.message);
+                        select.value = ocr.proveedor;
+                    } finally {
+                        select.disabled = false;
+                    }
+                });
+            }
+        }
     }
 
     // Le avisa al servidor que la interfaz sigue abierta. Si dejan de llegar estos

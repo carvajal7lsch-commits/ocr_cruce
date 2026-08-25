@@ -79,7 +79,7 @@ from src.parser import (
 )
 from src.reporter import generate_excel_report
 from src import db
-# El modulo completo, y no solo sus funciones: la calibracion cambia el motor en caliente
+# El modulo completo, y no solo sus funciones: el motor se puede cambiar en caliente
 # (proveedor_actual, aplicar_proveedor) y eso hay que verlo a traves del modulo.
 from src import ocr as ocr_mod
 from pdf2image import pdfinfo_from_bytes
@@ -164,7 +164,7 @@ generated_reports = {}
 # quedara ahi, cada poll intentaria serializarlo a JSON y reventaria con un 500.
 task_reconcile_context = {}
 
-# Clave en config_app donde queda guardado que motor gano la calibracion.
+# Clave en config_app con el motor de OCR elegido a mano, si alguien lo fijo.
 _CLAVE_PROVEEDOR_OCR = "ocr_proveedor"
 
 
@@ -177,9 +177,8 @@ def _startup():
 
 def _aplicar_proveedor_ocr_guardado():
     """
-    Retoma el motor de OCR que gano la calibracion en esta maquina. Si nunca se calibro,
-    se arranca en CPU (lo probado) y la calibracion corre sola despues de la primera
-    auditoria -- ver _calibrar_ocr_en_segundo_plano.
+    Retoma el motor de OCR elegido a mano en esta maquina, si lo hay. Por defecto es CPU:
+    ver el bloque de comentarios en src/ocr.py sobre por que la GPU no se activa sola.
     """
     try:
         guardado = db.get_config(_CLAVE_PROVEEDOR_OCR)
@@ -188,30 +187,6 @@ def _aplicar_proveedor_ocr_guardado():
     except Exception as err:
         print(f"Advertencia: no se pudo aplicar el motor de OCR guardado: {err}")
 
-
-def _calibrar_ocr_en_segundo_plano(imagenes):
-    """
-    Mide CPU contra GPU con paginas que se acaban de escanear y guarda el ganador para
-    las proximas corridas.
-
-    Corre DESPUES de terminar la auditoria y en un hilo aparte a proposito: al usuario no
-    le cuesta ni un segundo de espera, y las muestras son paginas de verdad -- que es lo
-    que hace fiable la medicion, porque el problema de la GPU aparece justo cuando las
-    entradas cambian de tamaño entre una pagina y otra.
-
-    Se hace UNA sola vez por maquina (queda en config_app). Para repetirla, basta con
-    borrar esa fila.
-    """
-    try:
-        ganador, seg_cpu, seg_gpu = ocr_mod.calibrar_proveedor(imagenes)
-        if not ganador:
-            return
-        db.set_config(_CLAVE_PROVEEDOR_OCR, ganador)
-        db.set_config("ocr_calibracion_cpu", round(seg_cpu, 3))
-        db.set_config("ocr_calibracion_gpu", round(seg_gpu, 3))
-        ocr_mod.aplicar_proveedor(ganador)
-    except Exception as err:
-        print(f"Advertencia: fallo la calibracion del motor de OCR: {err}")
 
 # Patterns for auto-detection
 PATTERN_DOC_COL = re.compile(r'\b(doc|documento|cédula|cedula|cc|id|identificación|identificacion|número|numero|nro)\b', re.IGNORECASE)
@@ -1169,7 +1144,7 @@ def run_audit_background(
                 # Se AVISA en vez de callarlo. Este camino no rompe la auditoria, y por eso
                 # paso desapercibido: solo se nota en que todo va mas lento y en que no
                 # quedan imagenes en memoria (lo que ademas deja sin muestras a la
-                # calibracion del motor de OCR). Un fallo que degrada en silencio es
+                # imagenes en memoria). Un fallo que degrada en silencio es
                 # justamente el que nadie investiga.
                 print(f"[ADVERTENCIA] Fallo la conversion por bloques "
                       f"({type(e).__name__}: {e}). Se convertira pagina por pagina, "
@@ -1560,29 +1535,6 @@ def run_audit_background(
             },
         }
 
-        # Muestras para calibrar el motor de OCR (ver _calibrar_ocr_en_segundo_plano).
-        # SEIS paginas, no una repetida ni dos: la CPU se mide procesandolas en paralelo
-        # (que es como trabaja de verdad), y con pocas muestras no alcanza a mostrar ese
-        # paralelismo -- la comparacion quedaria sesgada a favor de la GPU. Ademas los
-        # tamaños tienen que variar, porque DirectML recompila en cada forma nueva.
-        # Se preparan igual que las que ve el OCR real, para que los tiempos sean
-        # comparables.
-        imagenes_para_calibrar = []
-        try:
-            if total_a_escanear and imagenes_por_pagina:
-                for p_num in sorted(imagenes_por_pagina)[:6]:
-                    imagen = imagenes_por_pagina.get(p_num)
-                    if imagen is not None:
-                        imagenes_para_calibrar.append(
-                            np.array(preprocesar_imagen(imagen, metodo=img_filter))
-                        )
-        except Exception as prep_err:
-            # Calibrar es opcional y nunca debe estorbar, pero callarse por que no se
-            # pudo dejaba el problema invisible.
-            imagenes_para_calibrar = []
-            print(f"Advertencia: no se pudieron preparar muestras para calibrar "
-                  f"({type(prep_err).__name__}: {prep_err})")
-
         # Guardar en el historial persistente. Un fallo aqui NUNCA debe tumbar el
         # flujo en memoria que ya funciona -- por eso va envuelto aparte.
         try:
@@ -1610,26 +1562,6 @@ def run_audit_background(
             )
         except Exception as db_err:
             print(f"Advertencia: no se pudo guardar la auditoría {task_id} en el historial: {db_err}")
-
-        # Calibrar el motor de OCR una sola vez por maquina, con paginas que se acaban de
-        # escanear de verdad. Va al final y en segundo plano: la auditoria ya termino y el
-        # usuario ya tiene sus resultados, asi que no le cuesta espera.
-        try:
-            ya_calibrado = db.get_config(_CLAVE_PROVEEDOR_OCR)
-            if ya_calibrado:
-                pass                       # ya se decidio en esta maquina; nada que hacer
-            elif not imagenes_para_calibrar:
-                print(f"[INFO] Sin calibrar: no quedaron imagenes en memoria "
-                      f"(paginas escaneadas: {total_a_escanear}, "
-                      f"convertidas: {len(imagenes_por_pagina)}).")
-            else:
-                threading.Thread(
-                    target=_calibrar_ocr_en_segundo_plano,
-                    args=(imagenes_para_calibrar,),
-                    daemon=True,
-                ).start()
-        except Exception as cal_err:
-            print(f"Advertencia: no se pudo lanzar la calibración de OCR: {cal_err}")
 
     except Exception as e:
         tasks_db[task_id].update({
@@ -1850,15 +1782,10 @@ async def app_info():
       aplicacion" SOLO ahi -- en desarrollo el server se apaga con Ctrl+C, y un boton que
       mata el proceso mientras se programa es un accidente esperando ocurrir.
     - el motor de OCR activo y como se decidio. Sin esto, saber si esta usando CPU o GPU
-      obligaba a leer el log: la app elige sola (ver la calibracion en src/ocr.py), asi
-      que tiene que poder decir que eligio.
+      obligaba a leer el log. Por defecto es CPU; la GPU solo se usa si alguien la pide
+      con OCR_PROVEEDOR=dml (ver el comentario en src/ocr.py sobre por que no se activa
+      sola).
     """
-    try:
-        cpu = db.get_config("ocr_calibracion_cpu")
-        gpu = db.get_config("ocr_calibracion_gpu")
-        calibracion = {"cpu": float(cpu), "gpu": float(gpu)} if cpu and gpu else None
-    except Exception:
-        calibracion = None
 
     return {
         "empaquetada": bool(getattr(sys, "frozen", False)),
@@ -1866,9 +1793,42 @@ async def app_info():
             "proveedor": ocr_mod.proveedor_actual,
             "gpu_disponible": ocr_mod.hay_gpu_disponible(),
             "soporte_gpu": ocr_mod.soporta_gpu_esta_instalacion(),
-            "calibracion": calibracion,
+            "forzado": bool(ocr_mod._PROVEEDOR_FORZADO),
         },
     }
+
+
+class ProveedorOCR(BaseModel):
+    proveedor: str
+
+
+@app.post("/api/ocr-provider")
+async def cambiar_proveedor_ocr(cfg: ProveedorOCR):
+    """
+    Cambia el motor de OCR (procesador o GPU) desde la interfaz y lo deja guardado.
+
+    Existe para poder COMPARAR sin recompilar ni pelear con variables de entorno: se
+    elige el motor, se corre una auditoria de verdad y se miran los tiempos. Esa es la
+    unica medicion que resulto confiable -- una calibracion corta llego a predecir que la
+    GPU era 5x mas rapida cuando en la practica era 5x mas lenta (ver src/ocr.py).
+
+    Por eso NO hay opcion "automatico": la app no adivina, la persona mide y decide.
+    """
+    proveedor = (cfg.proveedor or "").strip().lower()
+    if proveedor not in (ocr_mod.PROVEEDOR_CPU, ocr_mod.PROVEEDOR_GPU):
+        raise HTTPException(status_code=400, detail=f"Motor desconocido: {cfg.proveedor}")
+    if proveedor == ocr_mod.PROVEEDOR_GPU and not ocr_mod.hay_gpu_disponible():
+        raise HTTPException(status_code=400, detail="Este equipo no tiene GPU utilizable para OCR")
+
+    if proveedor != ocr_mod.proveedor_actual and not ocr_mod.aplicar_proveedor(proveedor):
+        raise HTTPException(status_code=500, detail="No se pudo cambiar el motor de OCR")
+
+    try:
+        db.set_config(_CLAVE_PROVEEDOR_OCR, proveedor)
+    except Exception as err:
+        print(f"Advertencia: no se pudo guardar el motor de OCR elegido: {err}")
+
+    return {"proveedor": ocr_mod.proveedor_actual}
 
 
 @app.post("/api/shutdown")
