@@ -53,7 +53,43 @@ def _redirigir_salida_a_archivo():
         return None
 
 
+def _ocultar_consolas_de_procesos_hijos():
+    """
+    Evita que asomen ventanas de consola negras al ejecutar poppler.
+
+    Cuando la app corre SIN consola propia (que es como se compila el .exe), cada
+    programa de consola que lanza abre su propia ventana. poppler se ejecuta varias veces
+    por auditoria -- pdfinfo al cargar el PDF, y una comprobacion de version en CADA
+    conversion -- asi que el usuario ve parpadear ventanitas negras mientras trabaja. Para
+    alguien no tecnico eso no parece un detalle: parece que algo raro esta pasando.
+
+    pdf2image ya oculta la consola en la conversion principal, pero NO en esas dos
+    llamadas, y no expone ningun parametro para pedirselo. Por eso se marca a nivel de
+    proceso: todo hijo que se lance hereda CREATE_NO_WINDOW.
+
+    Solo aplica al .exe: corriendo desde consola en desarrollo, los hijos heredan esa
+    consola y no abren ninguna ventana nueva, asi que no hay nada que ocultar.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    import subprocess
+    if getattr(subprocess.Popen, "_sin_consola", False):
+        return
+
+    _PopenOriginal = subprocess.Popen
+
+    class _PopenSinConsola(_PopenOriginal):
+        _sin_consola = True
+
+        def __init__(self, *args, **kwargs):
+            kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+            super().__init__(*args, **kwargs)
+
+    subprocess.Popen = _PopenSinConsola
+
+
 RUTA_LOG = _redirigir_salida_a_archivo()
+_ocultar_consolas_de_procesos_hijos()
 
 import pandas as pd
 import numpy as np
@@ -177,15 +213,35 @@ def _startup():
 
 def _aplicar_proveedor_ocr_guardado():
     """
-    Retoma el motor de OCR elegido a mano en esta maquina, si lo hay. Por defecto es CPU:
-    ver el bloque de comentarios en src/ocr.py sobre por que la GPU no se activa sola.
+    Decide con que motor arranca el OCR:
+
+      1. Si alguien ya eligio uno en esta maquina, se respeta. Siempre. Una decision
+         manual no se pisa sola.
+      2. Si no, y el equipo tiene una tarjeta grafica DEDICADA, se usa la GPU: es el
+         caso donde de verdad aporta.
+      3. Si no, CPU. Es lo que conviene con graficos integrados (medido: 3.1 contra 3.3
+         s/pagina) y ademas no se degrada cuando baja la bateria.
+
+    Nunca queda atrapado: el selector de Configuracion permite cambiarlo con un clic, y
+    esa eleccion pasa a mandar por el punto 1.
     """
     try:
         guardado = db.get_config(_CLAVE_PROVEEDOR_OCR)
-        if guardado and guardado != ocr_mod.proveedor_actual:
-            ocr_mod.aplicar_proveedor(guardado)
+        if guardado:
+            if guardado != ocr_mod.proveedor_actual:
+                ocr_mod.aplicar_proveedor(guardado)
+            return
+
+        dedicada = ocr_mod.detectar_gpu_dedicada()
+        if dedicada and ocr_mod.hay_gpu_disponible():
+            print(f"[INFO] Tarjeta dedicada detectada ({dedicada}): se usara la GPU.")
+            if ocr_mod.aplicar_proveedor(ocr_mod.PROVEEDOR_GPU):
+                db.set_config(_CLAVE_PROVEEDOR_OCR, ocr_mod.PROVEEDOR_GPU)
+        elif dedicada:
+            print(f"[INFO] Hay tarjeta dedicada ({dedicada}) pero onnxruntime no puede "
+                  f"usarla; se sigue en CPU.")
     except Exception as err:
-        print(f"Advertencia: no se pudo aplicar el motor de OCR guardado: {err}")
+        print(f"Advertencia: no se pudo decidir el motor de OCR: {err}")
 
 
 # Patterns for auto-detection
@@ -1794,6 +1850,7 @@ async def app_info():
             "gpu_disponible": ocr_mod.hay_gpu_disponible(),
             "soporte_gpu": ocr_mod.soporta_gpu_esta_instalacion(),
             "forzado": bool(ocr_mod._PROVEEDOR_FORZADO),
+            "gpu_dedicada": ocr_mod.detectar_gpu_dedicada(),
         },
     }
 

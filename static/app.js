@@ -1355,16 +1355,23 @@ document.addEventListener('DOMContentLoaded', () => {
         if (enGpu) {
             detalle.push('El OCR se está ejecutando en la GPU.');
             detalle.push('');
-            detalle.push('Modo manual (OCR_PROVEEDOR=dml). En equipos con gráficos');
-            detalle.push('integrados suele ser bastante más lento que el procesador.');
+            if (ocr.gpu_dedicada) {
+                detalle.push('Tarjeta dedicada detectada:');
+                detalle.push('   ' + ocr.gpu_dedicada);
+            } else {
+                detalle.push('Con gráficos integrados esto suele rendir igual');
+                detalle.push('o peor que el procesador. Puedes volver a CPU');
+                detalle.push('en Configuración.');
+            }
         } else {
             detalle.push('El OCR se está ejecutando en el procesador (CPU).');
             detalle.push('');
             if (ocr.gpu_disponible) {
                 // Se dice que hay GPU y que aun asi se usa la CPU, porque si no parece
                 // que la app no la detecto. La razon esta medida: ver src/ocr.py.
-                detalle.push('Este equipo tiene GPU, pero el procesador resultó');
-                detalle.push('más rápido para este trabajo, así que se usa ese.');
+                detalle.push('Este equipo tiene gráficos integrados, donde el');
+                detalle.push('procesador rinde igual o mejor. Puedes cambiarlo');
+                detalle.push('en Configuración si quieres comparar.');
             } else if (ocr.soporte_gpu === false) {
                 detalle.push('Esta instalación no incluye soporte de GPU.');
                 detalle.push('No dice nada sobre la tarjeta gráfica del equipo.');

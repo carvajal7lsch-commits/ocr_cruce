@@ -1,5 +1,6 @@
 import io
 import os
+import sys
 import time
 import threading
 import cv2
@@ -69,8 +70,13 @@ ocr_error_carga = None
 #
 # Medido en una Intel Iris Xe, sobre el MISMO PDF de 22 paginas:
 #
-#     CPU, 8 paginas en paralelo ......  2.88 s/pagina
-#     GPU (DirectML), serializada ..... 15.83 s/pagina   <- 5.5x MAS LENTO
+#     CPU, 8 paginas en paralelo ...... 3.12 s/pagina
+#     GPU (DirectML), serializada ..... 3.33 s/pagina   <- ~7% mas lenta, van parejas
+#
+# OJO CON EL ESTADO DE ENERGIA: la misma GPU, con la bateria al 26%, dio 15.83 s/pagina
+# (5x peor). Windows estrangula los graficos integrados mucho antes que el procesador. Por
+# eso una medicion puntual no sirve para decidir de una vez y para siempre: lo que hoy
+# conviene enchufado deja de convenir con la bateria baja.
 #
 # Y la trampa: una calibracion corta (6 paginas por cada camino) predijo lo contrario --
 # "GPU 2.97 s/pagina, gana la GPU". Se equivoco por 5x. El motivo es que DirectML compila
@@ -118,6 +124,83 @@ def hay_gpu_disponible():
         return "DmlExecutionProvider" in ort.get_available_providers()
     except Exception:
         return False
+
+
+# Fabricantes de GPU segun el ID PCI del dispositivo. NVIDIA en PC es SIEMPRE dedicada;
+# Intel es integrada salvo las Arc, que son raras; AMD fabrica de las dos clases, asi que
+# ahi hace falta mirar tambien la memoria.
+_VENDEDORES_GPU = {"10DE": "NVIDIA", "1002": "AMD", "8086": "Intel"}
+
+# Memoria de video propia a partir de la cual se considera dedicada. Una integrada no
+# reporta este valor (comparte la RAM del sistema); una dedicada reporta su VRAM real.
+_VRAM_MINIMA_DEDICADA = 2 * 1024**3   # 2 GB
+
+
+def detectar_gpu_dedicada():
+    """
+    Busca una tarjeta grafica DEDICADA en el equipo. Devuelve su nombre, o None.
+
+    Se distingue de una integrada por dos señales del registro de Windows:
+      - el fabricante (NVIDIA en PC solo hace tarjetas dedicadas), y
+      - "qwMemorySize", la memoria de video PROPIA. Una integrada no la reporta porque
+        usa la RAM del sistema; medido en una Intel Iris Xe: sin qwMemorySize, y un
+        MemorySize de 2.15 GB que es memoria compartida, no suya.
+
+    Por que importa: en graficos integrados la GPU no aporta nada (medido: 3.3 contra 3.1
+    s/pagina) y con la bateria baja empeora mucho. En una tarjeta dedicada el panorama es
+    otro, y ahi si conviene usarla.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+
+    CLASE = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    try:
+        base = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, CLASE)
+    except OSError:
+        return None
+
+    indice = 0
+    while True:
+        try:
+            sub = winreg.EnumKey(base, indice)
+            indice += 1
+        except OSError:
+            break
+        if not sub.isdigit():
+            continue
+        try:
+            clave = winreg.OpenKey(base, sub)
+        except OSError:
+            continue
+
+        def leer(nombre):
+            try:
+                valor, _ = winreg.QueryValueEx(clave, nombre)
+                return valor
+            except OSError:
+                return None
+
+        nombre_gpu = leer("DriverDesc") or "GPU"
+        vram = leer("HardwareInformation.qwMemorySize")
+        if isinstance(vram, bytes):
+            vram = int.from_bytes(vram, "little")
+
+        # El fabricante sale del ID PCI del dispositivo (formato PCI\VEN_10DE&DEV_...).
+        ids = leer("MatchingDeviceId") or ""
+        marca = None
+        for codigo, nombre_marca in _VENDEDORES_GPU.items():
+            if f"ven_{codigo}".lower() in str(ids).lower():
+                marca = nombre_marca
+                break
+
+        es_dedicada = marca == "NVIDIA" or (isinstance(vram, int) and vram >= _VRAM_MINIMA_DEDICADA)
+        if es_dedicada:
+            return str(nombre_gpu)
+    return None
 
 
 def soporta_gpu_esta_instalacion():
