@@ -233,8 +233,20 @@ def calibrar_proveedor(muestras):
     No se toca el motor activo: se crean motores aparte para medir, y quien llama decide
     que hacer con el resultado.
     """
-    if not _using_new_rapidocr_pkg or not muestras or not hay_gpu_disponible():
+    # Cada motivo para no calibrar se dice en voz alta. La version anterior devolvia
+    # None en silencio y, cuando la calibracion no ocurria, no habia forma de saber cual
+    # de las tres condiciones fallo -- se perdian horas adivinando.
+    if not _using_new_rapidocr_pkg:
+        print("[INFO] Sin calibrar: el motor activo no es el paquete 'rapidocr'.")
         return None, None, None
+    if not muestras:
+        print("[INFO] Sin calibrar: no llegaron paginas de muestra.")
+        return None, None, None
+    if not hay_gpu_disponible():
+        print("[INFO] Sin calibrar: no hay GPU utilizable en este equipo.")
+        return None, None, None
+
+    print(f"[INFO] Calibrando motor de OCR con {len(muestras)} paginas...")
 
     from concurrent.futures import ThreadPoolExecutor
 

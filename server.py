@@ -1165,6 +1165,15 @@ def run_audit_background(
             except Exception as e:
                 # Fallback si la conversion en bloque falla: cada pagina se convierte
                 # individualmente mas adelante (mas lento, pero sigue funcionando).
+                #
+                # Se AVISA en vez de callarlo. Este camino no rompe la auditoria, y por eso
+                # paso desapercibido: solo se nota en que todo va mas lento y en que no
+                # quedan imagenes en memoria (lo que ademas deja sin muestras a la
+                # calibracion del motor de OCR). Un fallo que degrada en silencio es
+                # justamente el que nadie investiga.
+                print(f"[ADVERTENCIA] Fallo la conversion por bloques "
+                      f"({type(e).__name__}: {e}). Se convertira pagina por pagina, "
+                      f"que es mas lento.")
                 imagenes_por_pagina = {}
 
         if total_a_escanear:
@@ -1286,7 +1295,11 @@ def run_audit_background(
                         
                     image_url = f"/{CACHE_IMG_DIRNAME}/{image_filename}"
             except Exception as e:
-                pass
+                # La auditoria sigue: la imagen es para VER la pagina, no para leerla.
+                # Pero se avisa, porque si falla el usuario solo nota que la "Vista del
+                # Documento" salio vacia, sin ninguna pista de la causa.
+                print(f"[ADVERTENCIA] No se pudo generar la imagen de la pagina "
+                      f"{page_num} ({type(e).__name__}: {e})")
                 
             return {
                 "page_data": page_data,
@@ -1563,8 +1576,12 @@ def run_audit_background(
                         imagenes_para_calibrar.append(
                             np.array(preprocesar_imagen(imagen, metodo=img_filter))
                         )
-        except Exception:
-            imagenes_para_calibrar = []   # calibrar es opcional; nunca debe estorbar
+        except Exception as prep_err:
+            # Calibrar es opcional y nunca debe estorbar, pero callarse por que no se
+            # pudo dejaba el problema invisible.
+            imagenes_para_calibrar = []
+            print(f"Advertencia: no se pudieron preparar muestras para calibrar "
+                  f"({type(prep_err).__name__}: {prep_err})")
 
         # Guardar en el historial persistente. Un fallo aqui NUNCA debe tumbar el
         # flujo en memoria que ya funciona -- por eso va envuelto aparte.
@@ -1598,7 +1615,14 @@ def run_audit_background(
         # escanear de verdad. Va al final y en segundo plano: la auditoria ya termino y el
         # usuario ya tiene sus resultados, asi que no le cuesta espera.
         try:
-            if imagenes_para_calibrar and not db.get_config(_CLAVE_PROVEEDOR_OCR):
+            ya_calibrado = db.get_config(_CLAVE_PROVEEDOR_OCR)
+            if ya_calibrado:
+                pass                       # ya se decidio en esta maquina; nada que hacer
+            elif not imagenes_para_calibrar:
+                print(f"[INFO] Sin calibrar: no quedaron imagenes en memoria "
+                      f"(paginas escaneadas: {total_a_escanear}, "
+                      f"convertidas: {len(imagenes_por_pagina)}).")
+            else:
                 threading.Thread(
                     target=_calibrar_ocr_en_segundo_plano,
                     args=(imagenes_para_calibrar,),
