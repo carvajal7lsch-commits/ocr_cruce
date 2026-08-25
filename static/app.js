@@ -28,12 +28,16 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const pdfDpiInput = document.getElementById('pdf_dpi');
     const dpiVal = document.getElementById('dpi_val');
-    const imgFilterInput = document.getElementById('img_filter');
+    // El PDF se procesa SIEMPRE completo y con el mismo preprocesamiento. Los dos
+    // selectores que había para esto se quitaron de Configuración: el rango de páginas
+    // servía para analizar un tramo suelto (algo que en la práctica nadie hacía, y que
+    // dejaba auditorías incompletas por error), y el filtro de imagen ofrecía cinco
+    // opciones de las cuales una sola era la buena -- las demás estaban para comparar
+    // durante el desarrollo, no para el uso diario.
+    const FILTRO_IMAGEN = 'Solo Escala de Grises';
+    let totalPaginasPdf = 1;
     const similarityThresholdInput = document.getElementById('similarity_threshold');
     const similarityVal = document.getElementById('similarity_val');
-    const startPageInput = document.getElementById('start_page');
-    const endPageInput = document.getElementById('end_page');
-    const totalPagesHint = document.getElementById('total_pages_hint');
     
     const actionPanel = document.getElementById('action_panel');
     const startAuditBtn = document.getElementById('start_audit_btn');
@@ -250,13 +254,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
 
             pdfFileName.textContent = `${file.name} (${data.total_pages} págs.)`;
-            startPageInput.value = 1;
-            startPageInput.max = data.total_pages;
-            endPageInput.value = data.total_pages;
-            endPageInput.max = data.total_pages;
-            if (totalPagesHint) {
-                totalPagesHint.textContent = `${data.total_pages} páginas detectadas`;
-            }
+            totalPaginasPdf = data.total_pages;
             segundosPorPagina = data.segundos_por_pagina || null;
             actualizarEstimacion();
 
@@ -380,10 +378,10 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('key_col', keyColSelector.value);
         formData.append('compare_cols', selectedCompare.join(','));
         formData.append('similarity_threshold', similarityThresholdInput.value);
-        formData.append('start_page', startPageInput.value);
-        formData.append('end_page', endPageInput.value);
+        formData.append('start_page', 1);
+        formData.append('end_page', totalPaginasPdf);
         formData.append('pdf_dpi', pdfDpiInput.value);
-        formData.append('img_filter', imgFilterInput.value);
+        formData.append('img_filter', FILTRO_IMAGEN);
 
         // Clear and initialize console tab image
         const consoleImg = document.getElementById('console_ocr_image');
@@ -533,9 +531,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const desde = parseInt(startPageInput.value, 10) || 1;
-        const hasta = parseInt(endPageInput.value, 10) || desde;
-        const paginas = Math.max(0, hasta - desde + 1);
+        const paginas = totalPaginasPdf || 0;
         if (paginas <= 0) {
             estimacionTiempo.classList.add('hidden');
             return;
@@ -556,8 +552,6 @@ document.addEventListener('DOMContentLoaded', () => {
         estimacionTiempo.classList.remove('hidden');
     }
 
-    startPageInput.addEventListener('input', actualizarEstimacion);
-    endPageInput.addEventListener('input', actualizarEstimacion);
 
     function startClientTimer() {
         clientTimerStartedAt = Date.now();
@@ -1318,11 +1312,19 @@ document.addEventListener('DOMContentLoaded', () => {
         fetch('/api/app-info')
             .then(r => r.json())
             .then(info => {
+                mostrarMotorOCR(info.ocr);
                 if (!info.empaquetada) return;
                 closeAppBtn.classList.remove('hidden');
                 iniciarLatido();
             })
             .catch(() => {});
+
+        const motorModal = setupModal(
+            document.getElementById('ocr_engine_modal_overlay'),
+            document.getElementById('close_ocr_engine_btn')
+        );
+        const badgeMotor = document.getElementById('ocr_engine_badge');
+        if (badgeMotor) badgeMotor.addEventListener('click', motorModal.open);
 
         closeAppBtn.addEventListener('click', async () => {
             if (!confirm('¿Cerrar la aplicación? Se detendrá cualquier auditoría en curso.')) return;
@@ -1334,6 +1336,62 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             document.getElementById('goodbye_overlay').classList.remove('hidden');
         });
+    }
+
+    // Muestra con qué está corriendo el OCR. La app elige sola entre CPU y GPU midiendo
+    // cuál rinde más en la máquina, así que sin esto había que abrir el log para saberlo.
+    // El detalle (los tiempos medidos) va en el tooltip: es dato de diagnóstico, no algo
+    // que se consulte a diario.
+    function mostrarMotorOCR(ocr) {
+        const badge = document.getElementById('ocr_engine_badge');
+        const label = document.getElementById('ocr_engine_label');
+        const detalleEl = document.getElementById('ocr_engine_detalle');
+        if (!badge || !label || !ocr) return;
+
+        const enGpu = ocr.proveedor === 'dml';
+        label.textContent = enGpu ? 'GPU' : 'CPU';
+        badge.classList.toggle('gpu', enGpu);
+
+        // El detalle se arma como HTML y se abre con un clic. El tooltip nativo que había
+        // antes exigía dejar el mouse quieto un segundo sobre el indicador, y en la
+        // práctica no se veía: el cursor de ayuda prometía información que no llegaba.
+        const bloques = [];
+        bloques.push(`<p><strong>${enGpu
+            ? 'El OCR se está ejecutando en la GPU.'
+            : 'El OCR se está ejecutando en el procesador (CPU).'}</strong></p>`);
+
+        if (ocr.calibracion) {
+            const c = ocr.calibracion;
+            const masRapido = c.gpu < c.cpu ? 'gpu' : 'cpu';
+            bloques.push('<p>Esta aplicación midió las dos opciones en este mismo equipo, con páginas reales, y se quedó con la más rápida:</p>');
+            bloques.push(`
+                <table class="ocr-engine-tabla">
+                    <tr class="${masRapido === 'cpu' ? 'ganador' : ''}">
+                        <td>Procesador (CPU)</td><td>${c.cpu.toFixed(2)} s por página</td>
+                    </tr>
+                    <tr class="${masRapido === 'gpu' ? 'ganador' : ''}">
+                        <td>Tarjeta gráfica (GPU)</td><td>${c.gpu.toFixed(2)} s por página</td>
+                    </tr>
+                </table>`);
+            const dif = Math.abs(c.cpu - c.gpu) / Math.max(c.cpu, c.gpu) * 100;
+            bloques.push(`<p class="tip">La diferencia entre ambas es del ${dif.toFixed(0)}%.</p>`);
+        } else if (ocr.gpu_disponible) {
+            bloques.push('<p>Este equipo tiene una GPU que se puede usar, pero todavía no se ha medido cuál de las dos conviene.</p>');
+            bloques.push('<p class="tip">La medición se hace sola al terminar la primera auditoría, sin que tengas que esperar. El resultado se aplica desde la siguiente.</p>');
+        } else if (ocr.soporte_gpu === false) {
+            // Caso típico al correr desde el código fuente: el paquete instalado es el
+            // onnxruntime normal, que no habla con ninguna GPU. No decirlo así hacía
+            // pensar que la GPU del equipo no servía, cuando el que no la soporta es
+            // el paquete.
+            bloques.push('<p>Esta instalación no incluye soporte de GPU, así que el OCR usa el procesador.</p>');
+            bloques.push('<p class="tip">No dice nada sobre la tarjeta gráfica de este equipo: es el paquete de OCR instalado el que no la puede usar. La aplicación empaquetada (.exe) sí lo trae.</p>');
+        } else {
+            bloques.push('<p>No se detectó una tarjeta gráfica utilizable para OCR, así que se trabaja con el procesador.</p>');
+            bloques.push('<p class="tip">Es lo normal en equipos sin GPU compatible. No es un error.</p>');
+        }
+
+        if (detalleEl) detalleEl.innerHTML = bloques.join('');
+        badge.classList.remove('hidden');
     }
 
     // Le avisa al servidor que la interfaz sigue abierta. Si dejan de llegar estos

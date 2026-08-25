@@ -132,6 +132,11 @@ jobs:
           # dependencia suya. Si falta, esto revienta aca y no en la maquina del usuario.
           python -c "import onnxruntime; print('onnxruntime', onnxruntime.__version__, onnxruntime.get_available_providers())"
           if ($LASTEXITCODE -ne 0) { throw "onnxruntime no se puede importar" }
+          # Tiene que ser la variante DirectML: es la que permite medir CPU contra GPU en
+          # la maquina del usuario. Con el onnxruntime normal la app funciona, pero se
+          # queda en CPU para siempre sin avisar.
+          python -c "import onnxruntime as ort, sys; sys.exit(0 if 'DmlExecutionProvider' in ort.get_available_providers() else 'Falta DmlExecutionProvider: se instalo el onnxruntime normal en vez de onnxruntime-directml')"
+          if ($LASTEXITCODE -ne 0) { throw "onnxruntime sin soporte de GPU (DirectML)" }
           python -c "import fitz; print('PyMuPDF (fitz) OK')"
           if ($LASTEXITCODE -ne 0) { throw "PyMuPDF no se puede importar como 'fitz'" }
 

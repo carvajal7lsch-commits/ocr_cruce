@@ -1,4 +1,7 @@
 import io
+import os
+import time
+import threading
 import cv2
 import numpy as np
 from PIL import Image
@@ -58,9 +61,86 @@ _using_new_rapidocr_pkg = False
 # de verdad con un .exe empaquetado sin onnxruntime adentro.
 ocr_error_carga = None
 
+# --------------------------------------------------------------------------------------
+# Que hardware ejecuta el OCR: se MIDE, no se adivina
+# --------------------------------------------------------------------------------------
+# onnxruntime puede correr los modelos en la CPU o en la GPU (DirectML, que funciona con
+# cualquier GPU de Windows: Intel, AMD o NVIDIA, sin instalar nada aparte).
+#
+# La tentacion es "si hay GPU, usarla". No alcanza, porque la comparacion honesta no es
+# GPU contra CPU: es GPU contra CPU CON TODOS SUS NUCLEOS. Medido sobre 8 paginas reales
+# en una Intel Iris Xe (4 nucleos):
+#
+#     CPU, una pagina a la vez ....... 4.77 s/pagina
+#     CPU, 8 en paralelo (lo normal) . 1.73 s/pagina   <- contra esto hay que competir
+#     GPU, serializada ............... 1.46 s/pagina   <- gana, pero solo por ~16%
+#
+# Contra la CPU secuencial la GPU parece 3x mejor; contra la CPU real, apenas 16%. En una
+# maquina con GPU dedicada la diferencia deberia ser mucho mayor, y por eso la decision no
+# se cablea: se MIDE en cada equipo (ver calibrar_proveedor) y se guarda el ganador. Un
+# portatil modesto se queda en CPU, uno con buena GPU la aprovecha, sin listas de modelos
+# de GPU que mantener y sin arriesgarse a dejar a alguien con una app mas lenta.
+#
+# OJO CON LOS HILOS: DirectML NO admite inferencias concurrentes sobre el mismo motor. Con
+# 2, 4 u 8 hilos el proceso se cae con segmentation fault, siempre, de forma reproducible.
+# Como el servidor procesa varias paginas en paralelo, cuando el motor corre en GPU las
+# llamadas se serializan con un candado (ver _ejecutar_rapidocr). No es una perdida: la
+# GPU ya es un unico dispositivo y de todos modos atiende de a una.
+PROVEEDOR_CPU = "cpu"
+PROVEEDOR_GPU = "dml"
+
+# Serializa las llamadas al motor cuando corre en GPU. Ver la nota sobre los hilos arriba:
+# sin esto, con la GPU activa el proceso se cae con segmentation fault.
+_candado_gpu = threading.Lock()
+
+# Permite forzar uno a mano para pruebas: OCR_PROVEEDOR=cpu / OCR_PROVEEDOR=dml
+_PROVEEDOR_FORZADO = (os.environ.get("OCR_PROVEEDOR") or "").strip().lower() or None
+
+proveedor_actual = _PROVEEDOR_FORZADO or PROVEEDOR_CPU
+
+
+def _params_motor(proveedor):
+    params = dict(OCR_ENGINE_PARAMS_NEW_PKG)
+    params["EngineConfig.onnxruntime.use_dml"] = (proveedor == PROVEEDOR_GPU)
+    return params
+
+
+def hay_gpu_disponible():
+    """
+    Si onnxruntime puede usar la GPU en esta maquina. Que PUEDA no significa que
+    convenga: eso lo decide la medicion, no esta funcion.
+    """
+    try:
+        import onnxruntime as ort
+        return "DmlExecutionProvider" in ort.get_available_providers()
+    except Exception:
+        return False
+
+
+def soporta_gpu_esta_instalacion():
+    """
+    Si el onnxruntime instalado trae soporte de GPU, que es distinto de tener una GPU
+    utilizable. Sirve para no confundir las dos cosas en la interfaz: el paquete normal
+    ("onnxruntime") no habla con ninguna GPU, solo la variante "onnxruntime-directml" --
+    y decirle a alguien "este equipo no tiene GPU" cuando en realidad tiene una perfecta
+    pero el paquete no la soporta es una respuesta equivocada.
+    """
+    try:
+        import importlib.metadata as md
+        for dist in ("onnxruntime-directml", "onnxruntime-gpu"):
+            try:
+                md.version(dist)
+                return True
+            except md.PackageNotFoundError:
+                continue
+        return False
+    except Exception:
+        return False
+
+
 try:
     from rapidocr import RapidOCR
-    rapidocr_engine = RapidOCR(params=OCR_ENGINE_PARAMS_NEW_PKG)
+    rapidocr_engine = RapidOCR(params=_params_motor(proveedor_actual))
     rapidocr_available = True
     _using_new_rapidocr_pkg = True
 except Exception as err_nuevo:
@@ -89,7 +169,12 @@ def _ejecutar_rapidocr(img_array):
     "rapidocr_onnxruntime" (devuelve una tupla (lista, elapse)). Asi el resto del
     codigo (incluyendo el dibujo de cajas en server.py) no necesita saber cual es.
     """
-    raw = rapidocr_engine(img_array)
+    if proveedor_actual == PROVEEDOR_GPU:
+        # De a una: DirectML no soporta inferencias concurrentes (ver la nota de hilos).
+        with _candado_gpu:
+            raw = rapidocr_engine(img_array)
+    else:
+        raw = rapidocr_engine(img_array)
     if raw is None:
         return []
 
@@ -103,6 +188,85 @@ def _ejecutar_rapidocr(img_array):
 
     result, _elapse = raw
     return result or []
+
+def aplicar_proveedor(proveedor):
+    """
+    Cambia el motor a CPU o GPU en caliente. Devuelve True si quedo aplicado.
+
+    Si crear el motor nuevo falla (driver raro, GPU ocupada, lo que sea), se conserva el
+    que estaba funcionando: quedarse sin OCR por intentar acelerarlo seria un mal
+    negocio.
+    """
+    global rapidocr_engine, proveedor_actual
+    if not _using_new_rapidocr_pkg or proveedor == proveedor_actual:
+        return False
+    if proveedor == PROVEEDOR_GPU and not hay_gpu_disponible():
+        return False
+    try:
+        rapidocr_engine = RapidOCR(params=_params_motor(proveedor))
+        proveedor_actual = proveedor
+        print(f"[INFO] Motor de OCR usando: {proveedor}")
+        return True
+    except Exception as err:
+        print(f"[ADVERTENCIA] No se pudo cambiar el motor a {proveedor} "
+              f"({type(err).__name__}: {err}); sigue en {proveedor_actual}.")
+        return False
+
+
+def calibrar_proveedor(muestras):
+    """
+    Corre las mismas paginas por CPU y por GPU y devuelve cual conviene en ESTA maquina,
+    junto con los dos tiempos: (ganador, seg_cpu, seg_gpu). Devuelve (None, ...) si no
+    hay nada que comparar.
+
+    Cada camino se mide COMO SE VA A USAR de verdad, que es lo unico que hace comparable
+    el resultado:
+      - CPU: varias paginas a la vez, igual que el servidor.
+      - GPU: de a una, porque DirectML se cae con inferencias concurrentes.
+    Compararlas de otra forma da respuestas que suenan bien y son falsas: midiendo la CPU
+    de a una pagina, la GPU parecia 3x mejor cuando en realidad gana ~16%.
+
+    Se usan paginas REALES y de tamaños distintos, no una imagen repetida: DirectML
+    recompila su grafo cada vez que cambia la forma de la entrada, asi que una sola
+    muestra repetida mediria un caso que no ocurre nunca.
+
+    No se toca el motor activo: se crean motores aparte para medir, y quien llama decide
+    que hacer con el resultado.
+    """
+    if not _using_new_rapidocr_pkg or not muestras or not hay_gpu_disponible():
+        return None, None, None
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def medir(proveedor):
+        motor = RapidOCR(params=_params_motor(proveedor))
+        motor(muestras[0])                 # calentamiento: la 1a inferencia carga pesos
+        inicio = time.time()
+        if proveedor == PROVEEDOR_GPU:
+            for m in muestras:
+                motor(m)
+        else:
+            hilos = min(len(muestras), (os.cpu_count() or 4))
+            with ThreadPoolExecutor(max_workers=hilos) as ex:
+                list(ex.map(motor, muestras))
+        return (time.time() - inicio) / len(muestras)
+
+    try:
+        seg_cpu = medir(PROVEEDOR_CPU)
+        seg_gpu = medir(PROVEEDOR_GPU)
+    except Exception as err:
+        print(f"[ADVERTENCIA] No se pudo calibrar el motor de OCR "
+              f"({type(err).__name__}: {err}); se sigue en CPU.")
+        return None, None, None
+
+    # Se exige un margen del 10% para cambiar a GPU: si van parejos gana la CPU, que es el
+    # camino probado, el que no depende del driver de video y el que permite procesar
+    # varias paginas a la vez.
+    ganador = PROVEEDOR_GPU if seg_gpu < seg_cpu * 0.9 else PROVEEDOR_CPU
+    print(f"[INFO] Calibracion de OCR -> CPU {seg_cpu:.2f}s/pag | "
+          f"GPU {seg_gpu:.2f}s/pag | gana: {ganador}")
+    return ganador, seg_cpu, seg_gpu
+
 
 try:
     import fitz

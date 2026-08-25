@@ -24,7 +24,12 @@ rapidocr==3.9.2
 # como dependencia suya (soporta varios backends y los deja opcionales). Sin esta linea,
 # un entorno limpio instala rapidocr sin con que correrlo: el import falla, la app
 # arranca igual y TODAS las paginas fallan con "OCR no configurado correctamente".
-onnxruntime==1.19.2
+# Se usa la variante "directml" y no el onnxruntime normal: trae EXACTAMENTE el mismo
+# proveedor de CPU (medido: 4.35 vs 4.49 s/pagina, dentro del ruido) y ademas puede correr
+# los modelos en la GPU. Cual de los dos conviene NO se asume: la app lo mide en cada
+# maquina y guarda el ganador (ver la calibracion en src/ocr.py). Los dos paquetes se
+# pisan entre si, asi que va uno u otro, no ambos.
+onnxruntime-directml==1.19.2
 
 # PyMuPDF: se usa para leer la capa de texto de los PDFs digitales (src/ocr.py lo
 # importa como "fitz"). Queda clavado porque las versiones nuevas cambiaron ese nombre

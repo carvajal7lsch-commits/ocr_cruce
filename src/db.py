@@ -87,6 +87,17 @@ def init_db():
             conn.execute("ALTER TABLE audits ADD COLUMN scanned_pages INTEGER")
         except sqlite3.OperationalError:
             pass
+        # Ajustes que la app decide sola y tiene que recordar entre arranques. Hoy solo
+        # guarda que motor de OCR resulto mas rapido en ESTA maquina (ver calibracion en
+        # src/ocr.py), pero sirve para cualquier preferencia calculada, no configurada.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS config_app (
+                clave       TEXT PRIMARY KEY,
+                valor       TEXT,
+                updated_at  TEXT NOT NULL
+            )
+        """)
+
         # Clave del cache de OCR con la que se escaneo esta auditoria. Sin guardarla, al
         # borrar la auditoria del historial no habria forma de saber que filas de
         # ocr_cache le corresponden -- el cache va por CONTENIDO del PDF, no por task_id.
@@ -95,6 +106,23 @@ def init_db():
                 conn.execute(f"ALTER TABLE audits ADD COLUMN {columna} {tipo}")
             except sqlite3.OperationalError:
                 pass
+        conn.commit()
+
+
+def get_config(clave, por_defecto=None):
+    """Lee un ajuste calculado por la app. Devuelve por_defecto si no existe."""
+    with _connect() as conn:
+        fila = conn.execute("SELECT valor FROM config_app WHERE clave = ?", (clave,)).fetchone()
+    return fila["valor"] if fila else por_defecto
+
+
+def set_config(clave, valor):
+    """Guarda (o pisa) un ajuste calculado por la app."""
+    with _write_lock, _connect() as conn:
+        conn.execute("""
+            INSERT INTO config_app (clave, valor, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(clave) DO UPDATE SET valor=excluded.valor, updated_at=excluded.updated_at
+        """, (clave, str(valor), datetime.datetime.now().isoformat()))
         conn.commit()
 
 

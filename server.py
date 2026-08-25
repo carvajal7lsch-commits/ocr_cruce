@@ -79,6 +79,9 @@ from src.parser import (
 )
 from src.reporter import generate_excel_report
 from src import db
+# El modulo completo, y no solo sus funciones: la calibracion cambia el motor en caliente
+# (proveedor_actual, aplicar_proveedor) y eso hay que verlo a traves del modulo.
+from src import ocr as ocr_mod
 from pdf2image import pdfinfo_from_bytes
 
 try:
@@ -161,10 +164,54 @@ generated_reports = {}
 # quedara ahi, cada poll intentaria serializarlo a JSON y reventaria con un 500.
 task_reconcile_context = {}
 
+# Clave en config_app donde queda guardado que motor gano la calibracion.
+_CLAVE_PROVEEDOR_OCR = "ocr_proveedor"
+
+
 @app.on_event("startup")
 def _startup():
     db.init_db()
     _backfill_claves_cache()
+    _aplicar_proveedor_ocr_guardado()
+
+
+def _aplicar_proveedor_ocr_guardado():
+    """
+    Retoma el motor de OCR que gano la calibracion en esta maquina. Si nunca se calibro,
+    se arranca en CPU (lo probado) y la calibracion corre sola despues de la primera
+    auditoria -- ver _calibrar_ocr_en_segundo_plano.
+    """
+    try:
+        guardado = db.get_config(_CLAVE_PROVEEDOR_OCR)
+        if guardado and guardado != ocr_mod.proveedor_actual:
+            ocr_mod.aplicar_proveedor(guardado)
+    except Exception as err:
+        print(f"Advertencia: no se pudo aplicar el motor de OCR guardado: {err}")
+
+
+def _calibrar_ocr_en_segundo_plano(imagenes):
+    """
+    Mide CPU contra GPU con paginas que se acaban de escanear y guarda el ganador para
+    las proximas corridas.
+
+    Corre DESPUES de terminar la auditoria y en un hilo aparte a proposito: al usuario no
+    le cuesta ni un segundo de espera, y las muestras son paginas de verdad -- que es lo
+    que hace fiable la medicion, porque el problema de la GPU aparece justo cuando las
+    entradas cambian de tamaño entre una pagina y otra.
+
+    Se hace UNA sola vez por maquina (queda en config_app). Para repetirla, basta con
+    borrar esa fila.
+    """
+    try:
+        ganador, seg_cpu, seg_gpu = ocr_mod.calibrar_proveedor(imagenes)
+        if not ganador:
+            return
+        db.set_config(_CLAVE_PROVEEDOR_OCR, ganador)
+        db.set_config("ocr_calibracion_cpu", round(seg_cpu, 3))
+        db.set_config("ocr_calibracion_gpu", round(seg_gpu, 3))
+        ocr_mod.aplicar_proveedor(ganador)
+    except Exception as err:
+        print(f"Advertencia: fallo la calibracion del motor de OCR: {err}")
 
 # Patterns for auto-detection
 PATTERN_DOC_COL = re.compile(r'\b(doc|documento|cédula|cedula|cc|id|identificación|identificacion|número|numero|nro)\b', re.IGNORECASE)
@@ -1500,6 +1547,25 @@ def run_audit_background(
             },
         }
 
+        # Muestras para calibrar el motor de OCR (ver _calibrar_ocr_en_segundo_plano).
+        # SEIS paginas, no una repetida ni dos: la CPU se mide procesandolas en paralelo
+        # (que es como trabaja de verdad), y con pocas muestras no alcanza a mostrar ese
+        # paralelismo -- la comparacion quedaria sesgada a favor de la GPU. Ademas los
+        # tamaños tienen que variar, porque DirectML recompila en cada forma nueva.
+        # Se preparan igual que las que ve el OCR real, para que los tiempos sean
+        # comparables.
+        imagenes_para_calibrar = []
+        try:
+            if total_a_escanear and imagenes_por_pagina:
+                for p_num in sorted(imagenes_por_pagina)[:6]:
+                    imagen = imagenes_por_pagina.get(p_num)
+                    if imagen is not None:
+                        imagenes_para_calibrar.append(
+                            np.array(preprocesar_imagen(imagen, metodo=img_filter))
+                        )
+        except Exception:
+            imagenes_para_calibrar = []   # calibrar es opcional; nunca debe estorbar
+
         # Guardar en el historial persistente. Un fallo aqui NUNCA debe tumbar el
         # flujo en memoria que ya funciona -- por eso va envuelto aparte.
         try:
@@ -1527,6 +1593,19 @@ def run_audit_background(
             )
         except Exception as db_err:
             print(f"Advertencia: no se pudo guardar la auditoría {task_id} en el historial: {db_err}")
+
+        # Calibrar el motor de OCR una sola vez por maquina, con paginas que se acaban de
+        # escanear de verdad. Va al final y en segundo plano: la auditoria ya termino y el
+        # usuario ya tiene sus resultados, asi que no le cuesta espera.
+        try:
+            if imagenes_para_calibrar and not db.get_config(_CLAVE_PROVEEDOR_OCR):
+                threading.Thread(
+                    target=_calibrar_ocr_en_segundo_plano,
+                    args=(imagenes_para_calibrar,),
+                    daemon=True,
+                ).start()
+        except Exception as cal_err:
+            print(f"Advertencia: no se pudo lanzar la calibración de OCR: {cal_err}")
 
     except Exception as e:
         tasks_db[task_id].update({
@@ -1741,11 +1820,31 @@ def _vigilar_interfaz(intervalo=5):
 @app.get("/api/app-info")
 async def app_info():
     """
-    Le dice al frontend si esta corriendo dentro del .exe. Se usa para mostrar el boton
-    de "Cerrar aplicacion" SOLO ahi: en desarrollo el server se apaga con Ctrl+C, y un
-    boton que mata el proceso mientras se programa es un accidente esperando ocurrir.
+    Datos de la app para el frontend:
+
+    - "empaquetada": si corre dentro del .exe. Se usa para mostrar el boton de "Cerrar
+      aplicacion" SOLO ahi -- en desarrollo el server se apaga con Ctrl+C, y un boton que
+      mata el proceso mientras se programa es un accidente esperando ocurrir.
+    - el motor de OCR activo y como se decidio. Sin esto, saber si esta usando CPU o GPU
+      obligaba a leer el log: la app elige sola (ver la calibracion en src/ocr.py), asi
+      que tiene que poder decir que eligio.
     """
-    return {"empaquetada": bool(getattr(sys, "frozen", False))}
+    try:
+        cpu = db.get_config("ocr_calibracion_cpu")
+        gpu = db.get_config("ocr_calibracion_gpu")
+        calibracion = {"cpu": float(cpu), "gpu": float(gpu)} if cpu and gpu else None
+    except Exception:
+        calibracion = None
+
+    return {
+        "empaquetada": bool(getattr(sys, "frozen", False)),
+        "ocr": {
+            "proveedor": ocr_mod.proveedor_actual,
+            "gpu_disponible": ocr_mod.hay_gpu_disponible(),
+            "soporte_gpu": ocr_mod.soporta_gpu_esta_instalacion(),
+            "calibracion": calibracion,
+        },
+    }
 
 
 @app.post("/api/shutdown")

@@ -92,6 +92,50 @@ body {
     flex-shrink: 0;
 }
 
+/* Indicador del motor de OCR (CPU/GPU). Deliberadamente discreto: es informacion util
+   pero que no se consulta seguido, asi que acompaña a los botones del header sin
+   competir con ellos -- sin fondo, sin borde y en color secundario. */
+.ocr-engine-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 38px;
+    padding: 0 8px;
+    color: var(--text-secondary);
+    font-family: var(--font-primary);
+    font-weight: 600;
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    opacity: 0.65;
+    cursor: pointer;       /* se abre un panel con el detalle al hacer clic */
+    transition: opacity 0.2s ease;
+}
+.ocr-engine-badge:hover { opacity: 1; }
+/* Es un boton: se comporta como tal aunque no lo parezca */
+.ocr-engine-badge { background: none; border: none; }
+
+/* Tabla de tiempos del panel de motor de OCR */
+.ocr-engine-tabla {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0;
+}
+.ocr-engine-tabla td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--card-border);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+.ocr-engine-tabla td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+/* La fila que gano se resalta: es la que explica por que se eligio ese motor */
+.ocr-engine-tabla tr.ganador td {
+    color: var(--success, #22c55e);
+    font-weight: 700;
+}
+.ocr-engine-badge .icon { width: 15px; height: 15px; }
+/* Cuando corre en GPU se resalta: es lo excepcional y lo que da mas rendimiento. */
+.ocr-engine-badge.gpu { color: var(--success, #22c55e); opacity: 0.85; }
+
 .btn-header-action {
     display: inline-flex;
     align-items: center;
