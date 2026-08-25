@@ -162,6 +162,13 @@ jobs:
           $ort = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "onnxruntime*")
           if ($ort.Count -lt 1) { throw "El build salio SIN onnxruntime: los modelos no se podrian ejecutar" }
 
+          # DirectML.dll es lo que permite usar la GPU. Sin ella la app funciona igual,
+          # pero se queda en CPU PARA SIEMPRE y sin decir nada: la calibracion no
+          # encontraria proveedor de GPU y elegiria CPU "correctamente". Un fallo mudo,
+          # que es el peor tipo.
+          $dml = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "DirectML.dll")
+          if ($dml.Count -lt 1) { throw "El build salio SIN DirectML.dll: la GPU nunca se podria usar" }
+
           $mupdf = @(Get-ChildItem "dist\AuditoriaCedulas" -Recurse -Filter "*pymupdf*")
           if ($mupdf.Count -lt 1) { throw "El build salio SIN PyMuPDF: se pierde la lectura de PDFs con texto digital" }
 
@@ -182,6 +189,7 @@ jobs:
           Write-Host "poppler:     $($poppler.FullName)"
           Write-Host "modelos OCR: $($modelos.Count)"
           Write-Host "onnxruntime: $($ort.Count) archivos"
+          Write-Host "DirectML:    $($dml[0].FullName)"
           Write-Host "PyMuPDF:     $($mupdf.Count) archivos"
 
       - name: Empaquetar el .zip y calcular su SHA-256
